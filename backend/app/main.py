@@ -12,9 +12,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
+from app.tasks.scheduler import start_scheduler, stop_scheduler
 # from app.routers import search
 # from app.routers import search, hospitals
-from app.routers import search, hospitals, webhooks
+from app.routers import search, hospitals, webhooks, handshakes
 
 # ---------------------------------------------------------------------------
 # Lifespan — runs on startup and shutdown
@@ -26,8 +27,10 @@ async def lifespan(app: FastAPI):
     print("🟢 BedSignal API starting up...")
     print(f"   Environment: {settings.APP_ENV}")
     print(f"   Frontend:    {settings.FRONTEND_URL}")
+    start_scheduler()
     yield
     # ── Shutdown ──
+    stop_scheduler()
     print("🔴 BedSignal API shutting down...")
 
 
@@ -72,6 +75,6 @@ async def health_check():
 app.include_router(search.router, prefix="/api")
 app.include_router(hospitals.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
-# app.include_router(handshakes.router, prefix="/api")
+app.include_router(handshakes.router, prefix="/api")
 # app.include_router(dispatch.router, prefix="/api")
 # ---------------------------------------------------------------------------

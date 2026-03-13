@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     BASE_URL: str = "http://localhost:8000"
     FRONTEND_URL: str = "http://localhost:5173"
+    DRY_RUN: str = "false"
 
 
 # Single instance — import this everywhere

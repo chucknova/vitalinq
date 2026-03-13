@@ -4,7 +4,7 @@ Supabase client — single instance shared across the entire app.
 Usage anywhere:
     from app.database import supabase
 
-    result = supabase.table("hospitals").select("*").execute()
+    result = supabase.table("hospitals").select("*, location::text").execute()
 """
 
 from supabase import create_client

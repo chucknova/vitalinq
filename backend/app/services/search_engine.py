@@ -248,6 +248,8 @@ async def search_nearby(
 # ---------------------------------------------------------------------------
 
 def _parse_location(location) -> tuple[float | None, float | None]:
+    import shapely.wkb
+    import binascii
     """
     Extract lat/lng from Supabase geography column.
 
@@ -258,6 +260,14 @@ def _parse_location(location) -> tuple[float | None, float | None]:
     """
     if location is None:
         return None, None
+    
+    # Handle WKB hex format (Supabase PostGIS output)
+    if isinstance(location, str) and location.startswith("0101"):
+        try:
+            geom = shapely.wkb.loads(binascii.unhexlify(location))
+            return geom.y, geom.x
+        except Exception:
+            return None, None
 
     if isinstance(location, str):
         # Parse "POINT(lng lat)" or "SRID=4326;POINT(lng lat)"
@@ -273,11 +283,11 @@ def _parse_location(location) -> tuple[float | None, float | None]:
         except (IndexError, ValueError):
             return None, None
 
+    # GeoJSON parser
     if isinstance(location, dict):
-        # GeoJSON format: {"type": "Point", "coordinates": [lng, lat]}
         coords = location.get("coordinates")
         if coords and len(coords) >= 2:
-            return coords[1], coords[0]  # GeoJSON is [lng, lat]
+            return coords[1], coords[0]
 
     return None, None
 

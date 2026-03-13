@@ -27,10 +27,20 @@ from twilio.rest import Client
 from app.config import settings
 
 # ---------------------------------------------------------------------------
+# Dry run mode — logs messages to terminal instead of sending via Twilio.
+# Add DRY_RUN=true to your .env to enable.
+# Saves your Twilio message quota for the actual demo.
+# ---------------------------------------------------------------------------
+DRY_RUN = getattr(settings, "DRY_RUN", "false").lower() in ("true", "1", "yes")
+
+# ---------------------------------------------------------------------------
 # Twilio client — single instance
 # ---------------------------------------------------------------------------
 client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
 FROM_NUMBER = settings.TWILIO_WHATSAPP_NUMBER  # "whatsapp:+14155238886"
+
+if DRY_RUN:
+    print("⚠️  WhatsApp DRY RUN mode — messages will be logged, not sent")
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +65,13 @@ async def send_text(to: str, body: str):
     This is the most common message type — used for confirmations,
     status displays, error messages, etc.
     """
+    if DRY_RUN:
+        print(f"\n📤 DRY RUN → {to}")
+        print(f"{'─' * 50}")
+        print(body)
+        print(f"{'─' * 50}\n")
+        return None
+
     try:
         message = client.messages.create(
             body=body,
@@ -138,6 +155,11 @@ async def send_buttons_content_api(
         )
     """
     import json
+    if DRY_RUN:
+        print(f"\n📤 DRY RUN BUTTONS → {to} [template: {content_sid}]")
+        print(f"   Variables: {content_variables}")
+        return None
+
     try:
         message = client.messages.create(
             content_sid=content_sid,
@@ -216,6 +238,11 @@ async def send_list_content_api(
     Same as send_buttons_content_api but for list templates.
     """
     import json
+    if DRY_RUN:
+        print(f"\n📤 DRY RUN LIST → {to} [template: {content_sid}]")
+        print(f"   Variables: {content_variables}")
+        return None
+
     try:
         message = client.messages.create(
             content_sid=content_sid,

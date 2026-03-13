@@ -15,8 +15,14 @@ Priority order (first match wins):
 import re
 from app.database import supabase
 from app.services.sessions import get_session, set_session, update_session, clear_session
-from app.services.whatsapp import send_text, send_list, resolve_numeric_reply
+from app.services.whatsapp import send_text, send_list, send_buttons, resolve_numeric_reply
 from app.services.search_engine import search_nearby
+from app.services.handshake_mgr import (
+    create_handshake,
+    accept_handshake,
+    decline_handshake,
+    get_handshake_detail,
+)
 from app.services.hospital_flows import (
     handle_still_accurate,
     handle_all_full,
@@ -218,13 +224,11 @@ async def handle_button(phone: str, payload: str):
 
     elif payload.startswith("accept_handshake_"):
         handshake_id = payload.replace("accept_handshake_", "")
-        print(f"   → Accept handshake {handshake_id}")
-        # TODO: Phase 6 — handle_handshake_accept(handshake_id)
+        await handle_handshake_accept(phone, handshake_id)
 
     elif payload.startswith("decline_handshake_"):
         handshake_id = payload.replace("decline_handshake_", "")
-        print(f"   → Decline handshake {handshake_id}")
-        # TODO: Phase 6 — handle_handshake_decline(handshake_id)
+        await handle_handshake_decline(phone, handshake_id)
 
     elif payload.startswith("yes_followup_"):
         query_id = payload.replace("yes_followup_", "")
@@ -344,10 +348,15 @@ async def handle_session_input(
             if lat is not None and lng is not None:
                 print(f"   → Location for triage: {lat}, {lng}")
                 description = session["data"].get("description", "")
+                parsed = session["data"].get("parsed_requirements")
+
+                # Run enriched search with equipment filtering
                 await run_search_and_send_results(
                     phone, lat, lng,
                     query_type="triage",
                     query_text=description,
+                    required_equipment=parsed.get("required_equipment") if parsed else None,
+                    bed_type=parsed["required_beds"][0] if parsed and parsed.get("required_beds") else None,
                 )
             else:
                 await send_text(phone, (
@@ -355,13 +364,13 @@ async def handle_session_input(
                     "hospitals near you.\n\n"
                     "Tap the + button and select *Location*."
                 ))
+        elif step == "awaiting_selection":
+            await send_text(phone, "Please reply with a number to select a hospital from the list above.")
 
     elif flow == "handshake":
         if step == "awaiting_summary":
             print(f"   → Patient summary: '{body}'")
-            # TODO: Phase 6 — create handshake with this summary
-            await send_text(phone, "🔄 Sending bed hold request... (Handshake system coming in Phase 6)")
-            clear_session(phone)
+            await handle_handshake_create(phone, body, session)
 
     else:
         print(f"   → Unknown flow '{flow}', clearing")
@@ -470,7 +479,182 @@ async def run_search_and_send_results(
 
 
 # ---------------------------------------------------------------------------
-# User-side stubs (Phases 5, 6)
+# Handshake WhatsApp handlers
+# ---------------------------------------------------------------------------
+
+async def handle_handshake_create(phone: str, patient_summary: str, session: dict):
+    """User provided patient summary. Create handshake and notify hospital."""
+    data = session["data"]
+    hospital_id = data.get("selected_hospital_id")
+    query_id = data.get("query_id")
+
+    if not hospital_id:
+        await send_text(phone, "Something went wrong. Please start a new search by sending *EMERGENCY*.")
+        clear_session(phone)
+        return
+
+    # Fetch hospital details
+    hospital = (
+        supabase.table("hospitals")
+        .select("id, name, address, whatsapp_number, location")
+        .eq("id", hospital_id)
+        .execute()
+    )
+    if not hospital.data:
+        await send_text(phone, "Hospital not found. Please try again.")
+        clear_session(phone)
+        return
+
+    h = hospital.data[0]
+
+    # Determine bed type (use first available from the hospital, or "emergency" as default)
+    beds = (
+        supabase.table("hospital_beds")
+        .select("bed_type, available_count")
+        .eq("hospital_id", hospital_id)
+        .gt("available_count", 0)
+        .order("available_count", desc=True)
+        .limit(1)
+        .execute()
+    )
+    bed_type = beds.data[0]["bed_type"] if beds.data else "emergency"
+
+    # Create the handshake
+    handshake = await create_handshake(
+        receiving_hospital_id=hospital_id,
+        bed_type=bed_type,
+        requesting_party_type="individual",
+        requesting_party_phone=phone,
+        patient_summary=patient_summary,
+        query_id=query_id,
+        hold_duration_min=45,
+    )
+
+    transfer_code = handshake["transfer_code"]
+    handshake_id = handshake["id"]
+
+    # Notify the requester
+    await send_text(phone, (
+        f"🔄 *Bed hold request sent to {h['name']}*\n\n"
+        f"Transfer code: *{transfer_code}*\n"
+        f"Awaiting hospital confirmation...\n\n"
+        f"We'll notify you when they respond."
+    ))
+
+    # Notify the receiving hospital
+    hospital_phone = h["whatsapp_number"]
+    bed_label = bed_type.upper()
+
+    await send_buttons(hospital_phone, (
+        f"🚨 *Incoming Patient — Bed Hold Request*\n\n"
+        f"Bed needed: *{bed_label}*\n"
+        f"Patient: {patient_summary}\n"
+        f"Transfer code: *{transfer_code}*\n\n"
+        f"Hold expires in 45 min if accepted."
+    ), [
+        ("✅ Accept", f"accept_handshake_{handshake_id}"),
+        ("❌ Decline", f"decline_handshake_{handshake_id}"),
+    ])
+
+    clear_session(phone)
+
+
+async def handle_handshake_accept(phone: str, handshake_id: str):
+    """Hospital tapped Accept — confirm bed hold."""
+    handshake = await accept_handshake(handshake_id)
+
+    if not handshake:
+        await send_text(phone, "This bed request has already been handled or expired.")
+        return
+
+    # Fetch full details for notifications
+    detail = await get_handshake_detail(handshake_id)
+    if not detail:
+        return
+
+    hospital_info = detail.get("_hospital", {})
+    hospital_name = hospital_info.get("name", "the hospital")
+    hospital_address = hospital_info.get("address", "")
+    transfer_code = detail["transfer_code"]
+    bed_type = detail["bed_type"].upper()
+    hold_minutes = detail.get("hold_duration_min", 45)
+    requester_phone = detail["requesting_party_phone"]
+
+    # Google Maps link
+    from app.services.search_engine import _parse_location
+    h_lat, h_lng = _parse_location(hospital_info.get("location"))
+    maps_link = ""
+    if h_lat and h_lng:
+        maps_link = f"\n📍 https://maps.google.com/maps?daddr={h_lat},{h_lng}"
+
+    # Notify the hospital (confirmation)
+    await send_text(phone, (
+        f"✅ *Bed hold confirmed*\n\n"
+        f"Transfer code: *{transfer_code}*\n"
+        f"Bed type: {bed_type}\n"
+        f"Hold expires in {hold_minutes} minutes.\n\n"
+        f"Patient should show the transfer code on arrival."
+    ))
+
+    # Notify the requester
+    await send_text(requester_phone, (
+        f"✅ *Bed confirmed at {hospital_name}!*\n\n"
+        f"Bed type: {bed_type}\n"
+        f"Address: {hospital_address}\n"
+        f"Transfer code: *{transfer_code}*\n"
+        f"Bed held for {hold_minutes} minutes.\n\n"
+        f"Show the transfer code on arrival.{maps_link}"
+    ))
+
+
+async def handle_handshake_decline(phone: str, handshake_id: str):
+    """Hospital tapped Decline — notify requester and offer alternatives."""
+    handshake = await decline_handshake(handshake_id)
+
+    if not handshake:
+        await send_text(phone, "This bed request has already been handled or expired.")
+        return
+
+    detail = await get_handshake_detail(handshake_id)
+    if not detail:
+        return
+
+    hospital_info = detail.get("_hospital", {})
+    hospital_name = hospital_info.get("name", "the hospital")
+    requester_phone = detail["requesting_party_phone"]
+
+    # Notify hospital
+    await send_text(phone, f"Noted. Bed request from transfer code *{detail['transfer_code']}* declined.")
+
+    # Notify requester and offer alternatives
+    await send_text(requester_phone, (
+        f"❌ *{hospital_name}* could not hold a bed right now.\n\n"
+        f"Searching for other hospitals near you..."
+    ))
+
+    # Re-run search if we have the query context
+    query_id = detail.get("query_id")
+    if query_id:
+        query = (
+            supabase.table("queries")
+            .select("user_location, query_text")
+            .eq("id", query_id)
+            .execute()
+        )
+        # For now, ask user to search again
+        await send_text(requester_phone, (
+            "Send *EMERGENCY* to search again, or share your location "
+            "to find other available hospitals."
+        ))
+    else:
+        await send_text(requester_phone, (
+            "Send *EMERGENCY* to search again, or share your location "
+            "to find other available hospitals."
+        ))
+
+
+# ---------------------------------------------------------------------------
+# User-side handlers
 # ---------------------------------------------------------------------------
 
 async def handle_location_search(phone: str, lat: float, lng: float):
@@ -496,14 +680,37 @@ async def handle_panic_mode_start(phone: str, profile_name: str):
 
 
 async def handle_triage_start(phone: str, description: str, profile_name: str):
-    """Default — natural language, will go to Claude in Phase 5."""
+    """Default — natural language → Claude parses → ask for location → enriched search."""
     print(f"🧠 TRIAGE: {phone} — '{description[:60]}'")
+
+    # Parse with Claude (or cache)
+    from app.services.triage import parse_emergency
+    parsed = await parse_emergency(description)
+
+    # Format the analysis for the user
+    condition = parsed["condition_category"].replace("_", " ").title()
+    equipment_readable = ", ".join(
+        eq.replace("_", " ").title() for eq in parsed.get("required_equipment", [])
+    )
+    specialists_readable = ", ".join(
+        sp.replace("_", " ").title() for sp in parsed.get("required_specialists", [])
+    )
+
+    analysis_parts = [f"🧠 *BedSignal analyzed your emergency:*\n"]
+    analysis_parts.append(f"Likely: *{condition}*")
+    analysis_parts.append(f"Urgency: *{parsed['urgency'].upper()}*")
+    if equipment_readable:
+        analysis_parts.append(f"Needs: {equipment_readable}")
+    if specialists_readable:
+        analysis_parts.append(f"Specialists: {specialists_readable}")
+    analysis_parts.append(f"\n📍 Share your *location* for the nearest matches.")
+    analysis_parts.append("Tap the + button and select *Location*.")
+
+    # Store parsed requirements in session so we use them when location arrives
     set_session(phone, flow="triage", step="awaiting_location", data={
         "description": description,
         "profile_name": profile_name,
+        "parsed_requirements": parsed,
     })
-    await send_text(phone, (
-        "🧠 I'll analyze your emergency to find the best hospital.\n\n"
-        "📍 Please share your *location* so I can search nearby.\n\n"
-        "Tap the + button and select *Location*."
-    ))
+
+    await send_text(phone, "\n".join(analysis_parts))
