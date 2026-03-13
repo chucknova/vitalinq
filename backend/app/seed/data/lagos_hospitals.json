@@ -1,0 +1,1410 @@
+[
+  {
+    "name": "Lagos University Teaching Hospital (LUTH)",
+    "slug": "luth-idi-araba",
+    "latitude": 6.517,
+    "longitude": 3.3555,
+    "address": "Ishaga Road, Idi-Araba, Surulere",
+    "lga": "Surulere",
+    "city": "Lagos",
+    "phone": "+2341234500001",
+    "whatsapp_number": "+2349060000001",
+    "email": "admin@luth.gov.ng",
+    "hospital_type": "teaching",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": true,
+    "has_ventilators": true,
+    "has_dialysis": true,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 800,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 30,
+        "available": 18,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 300,
+        "available": 180,
+        "overflow": 0
+      },
+      "maternity": {
+        "total": 80,
+        "available": 48,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 40,
+        "available": 24,
+        "overflow": 0
+      },
+      "pediatric": {
+        "total": 60,
+        "available": 36,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 50,
+        "available": 30,
+        "overflow": 0
+      },
+      "psychiatric": {
+        "total": 30,
+        "available": 18,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Lagos State University Teaching Hospital (LASUTH)",
+    "slug": "lasuth-ikeja",
+    "latitude": 6.6018,
+    "longitude": 3.3515,
+    "address": "1 Oba Akinjobi Way, Ikeja",
+    "lga": "Ikeja",
+    "city": "Lagos",
+    "phone": "+2341234500002",
+    "whatsapp_number": "+2349060000002",
+    "email": "admin@lasuth.lg.gov.ng",
+    "hospital_type": "teaching",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": true,
+    "has_ventilators": true,
+    "has_dialysis": true,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 600,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 25,
+        "available": 2,
+        "overflow": 1
+      },
+      "ward": {
+        "total": 250,
+        "available": 18,
+        "overflow": 8
+      },
+      "maternity": {
+        "total": 60,
+        "available": 5,
+        "overflow": 2
+      },
+      "emergency": {
+        "total": 35,
+        "available": 3,
+        "overflow": 3
+      },
+      "pediatric": {
+        "total": 45,
+        "available": 4,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 40,
+        "available": 2,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "National Orthopaedic Hospital Igbobi",
+    "slug": "noh-igbobi",
+    "latitude": 6.531,
+    "longitude": 3.383,
+    "address": "Igbobi, Jibowu, Lagos",
+    "lga": "Surulere",
+    "city": "Lagos",
+    "phone": "+2341234500003",
+    "whatsapp_number": "+2349060000003",
+    "email": "info@nohigbobi.gov.ng",
+    "hospital_type": "teaching",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 350,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 12,
+        "available": 1,
+        "overflow": 1
+      },
+      "ward": {
+        "total": 180,
+        "available": 12,
+        "overflow": 5
+      },
+      "emergency": {
+        "total": 25,
+        "available": 2,
+        "overflow": 1
+      },
+      "surgical": {
+        "total": 40,
+        "available": 4,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Lagos Island Maternity Hospital",
+    "slug": "lagos-island-maternity",
+    "latitude": 6.4541,
+    "longitude": 3.4075,
+    "address": "Broad Street, Lagos Island",
+    "lga": "Lagos Island",
+    "city": "Lagos",
+    "phone": "+2341234500004",
+    "whatsapp_number": "+2349060000004",
+    "email": "info@lagosislandmaternity.lg.gov.ng",
+    "hospital_type": "teaching",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 250,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 8,
+        "available": 1,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 60,
+        "available": 5,
+        "overflow": 2
+      },
+      "maternity": {
+        "total": 120,
+        "available": 15,
+        "overflow": 6
+      },
+      "pediatric": {
+        "total": 30,
+        "available": 4,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Ikeja General Hospital",
+    "slug": "ikeja-general",
+    "latitude": 6.5955,
+    "longitude": 3.3425,
+    "address": "Opp. Local Govt. Secretariat, Ikeja",
+    "lga": "Ikeja",
+    "city": "Lagos",
+    "phone": "+2341234500005",
+    "whatsapp_number": "+2349060000005",
+    "email": "info@ikejagh.lg.gov.ng",
+    "hospital_type": "general",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 200,
+    "trust_tier": "active",
+    "bed_types": {
+      "icu": {
+        "total": 8,
+        "available": 1,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 100,
+        "available": 12,
+        "overflow": 4
+      },
+      "maternity": {
+        "total": 30,
+        "available": 3,
+        "overflow": 1
+      },
+      "emergency": {
+        "total": 20,
+        "available": 2,
+        "overflow": 1
+      }
+    }
+  },
+  {
+    "name": "Surulere General Hospital",
+    "slug": "surulere-general",
+    "latitude": 6.5,
+    "longitude": 3.35,
+    "address": "Randle Avenue, Surulere",
+    "lga": "Surulere",
+    "city": "Lagos",
+    "phone": "+2341234500006",
+    "whatsapp_number": "+2349060000006",
+    "email": "info@suruleregh.lg.gov.ng",
+    "hospital_type": "general",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 180,
+    "trust_tier": "active",
+    "bed_types": {
+      "icu": {
+        "total": 6,
+        "available": 0,
+        "overflow": 1
+      },
+      "ward": {
+        "total": 90,
+        "available": 8,
+        "overflow": 3
+      },
+      "maternity": {
+        "total": 25,
+        "available": 2,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 15,
+        "available": 1,
+        "overflow": 1
+      }
+    }
+  },
+  {
+    "name": "Mushin General Hospital",
+    "slug": "mushin-general",
+    "latitude": 6.5375,
+    "longitude": 3.353,
+    "address": "Palm Avenue, Mushin",
+    "lga": "Mushin",
+    "city": "Lagos",
+    "phone": "+2341234500007",
+    "whatsapp_number": "+2349060000007",
+    "email": "info@mushingh.lg.gov.ng",
+    "hospital_type": "general",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 120,
+    "trust_tier": "active",
+    "bed_types": {
+      "ward": {
+        "total": 70,
+        "available": 0,
+        "overflow": 0
+      },
+      "maternity": {
+        "total": 20,
+        "available": 0,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 15,
+        "available": 0,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Gbagada General Hospital",
+    "slug": "gbagada-general",
+    "latitude": 6.552,
+    "longitude": 3.387,
+    "address": "Hospital Road, Gbagada, Kosofe",
+    "lga": "Kosofe",
+    "city": "Lagos",
+    "phone": "+2341234500008",
+    "whatsapp_number": "+2349060000008",
+    "email": "info@gbagadagh.lg.gov.ng",
+    "hospital_type": "general",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 250,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 10,
+        "available": 6,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 120,
+        "available": 72,
+        "overflow": 0
+      },
+      "maternity": {
+        "total": 35,
+        "available": 21,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 20,
+        "available": 12,
+        "overflow": 0
+      },
+      "pediatric": {
+        "total": 25,
+        "available": 15,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Harvey Road General Hospital",
+    "slug": "harvey-road-general",
+    "latitude": 6.5185,
+    "longitude": 3.3605,
+    "address": "Harvey Road, Yaba, Surulere",
+    "lga": "Surulere",
+    "city": "Lagos",
+    "phone": "+2341234500009",
+    "whatsapp_number": "+2349060000009",
+    "email": "info@harveygh.lg.gov.ng",
+    "hospital_type": "general",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 100,
+    "trust_tier": "active",
+    "bed_types": {
+      "ward": {
+        "total": 60,
+        "available": 36,
+        "overflow": 0
+      },
+      "maternity": {
+        "total": 15,
+        "available": 9,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 12,
+        "available": 7,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Kosofe General Hospital",
+    "slug": "kosofe-general",
+    "latitude": 6.578,
+    "longitude": 3.41,
+    "address": "Demurin Road, Ketu, Kosofe",
+    "lga": "Kosofe",
+    "city": "Lagos",
+    "phone": "+2341234500010",
+    "whatsapp_number": "+2349060000010",
+    "email": "info@kosofegh.lg.gov.ng",
+    "hospital_type": "general",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 100,
+    "trust_tier": "active",
+    "bed_types": {
+      "ward": {
+        "total": 55,
+        "available": 7,
+        "overflow": 2
+      },
+      "maternity": {
+        "total": 20,
+        "available": 3,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 10,
+        "available": 0,
+        "overflow": 1
+      }
+    }
+  },
+  {
+    "name": "Lagos Island General Hospital",
+    "slug": "lagos-island-general",
+    "latitude": 6.449,
+    "longitude": 3.401,
+    "address": "Adeniji Adele Road, Lagos Island",
+    "lga": "Lagos Island",
+    "city": "Lagos",
+    "phone": "+2341234500011",
+    "whatsapp_number": "+2349060000011",
+    "email": "info@lagosislandgh.lg.gov.ng",
+    "hospital_type": "general",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 160,
+    "trust_tier": "active",
+    "bed_types": {
+      "icu": {
+        "total": 5,
+        "available": 0,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 80,
+        "available": 0,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 18,
+        "available": 0,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Eti-Osa Maternal and Child Centre",
+    "slug": "eti-osa-mcc",
+    "latitude": 6.431,
+    "longitude": 3.472,
+    "address": "Maroko Road, Victoria Island Extension",
+    "lga": "Eti-Osa",
+    "city": "Lagos",
+    "phone": "+2341234500012",
+    "whatsapp_number": "+2349060000012",
+    "email": "info@etiosamcc.lg.gov.ng",
+    "hospital_type": "maternity",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": false,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 60,
+    "trust_tier": "active",
+    "bed_types": {
+      "maternity": {
+        "total": 40,
+        "available": 6,
+        "overflow": 2
+      },
+      "pediatric": {
+        "total": 15,
+        "available": 3,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Ayinke House (LASUTH Maternity)",
+    "slug": "ayinke-house-lasuth",
+    "latitude": 6.6005,
+    "longitude": 3.349,
+    "address": "LASUTH Complex, Ikeja",
+    "lga": "Ikeja",
+    "city": "Lagos",
+    "phone": "+2341234500013",
+    "whatsapp_number": "+2349060000013",
+    "email": "ayinke@lasuth.lg.gov.ng",
+    "hospital_type": "maternity",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 150,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 6,
+        "available": 1,
+        "overflow": 0
+      },
+      "maternity": {
+        "total": 90,
+        "available": 10,
+        "overflow": 4
+      },
+      "pediatric": {
+        "total": 30,
+        "available": 5,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Isolo Maternity Centre",
+    "slug": "isolo-maternity",
+    "latitude": 6.531,
+    "longitude": 3.321,
+    "address": "Isolo Road, Mushin",
+    "lga": "Mushin",
+    "city": "Lagos",
+    "phone": "+2341234500014",
+    "whatsapp_number": "+2349060000014",
+    "email": "info@isolomat.lg.gov.ng",
+    "hospital_type": "maternity",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": false,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 50,
+    "trust_tier": "active",
+    "bed_types": {
+      "maternity": {
+        "total": 35,
+        "available": 4,
+        "overflow": 1
+      },
+      "pediatric": {
+        "total": 10,
+        "available": 2,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Iwaya Maternity Centre",
+    "slug": "iwaya-maternity",
+    "latitude": 6.512,
+    "longitude": 3.381,
+    "address": "Iwaya Road, Yaba",
+    "lga": "Surulere",
+    "city": "Lagos",
+    "phone": "+2341234500015",
+    "whatsapp_number": "+2349060000015",
+    "email": "info@iwayamat.lg.gov.ng",
+    "hospital_type": "maternity",
+    "has_icu": false,
+    "has_theatre": false,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": false,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": false,
+    "has_ambulance": false,
+    "total_beds": 30,
+    "trust_tier": "active",
+    "bed_types": {
+      "maternity": {
+        "total": 22,
+        "available": 3,
+        "overflow": 0
+      },
+      "pediatric": {
+        "total": 8,
+        "available": 1,
+        "overflow": 0
+      }
+    },
+    "_stale": true
+  },
+  {
+    "name": "Amuwo-Odofin Maternity Centre",
+    "slug": "amuwo-maternity",
+    "latitude": 6.464,
+    "longitude": 3.357,
+    "address": "Festac Link Road, Amuwo-Odofin",
+    "lga": "Surulere",
+    "city": "Lagos",
+    "phone": "+2341234500016",
+    "whatsapp_number": "+2349060000016",
+    "email": "info@amuwomat.lg.gov.ng",
+    "hospital_type": "maternity",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": false,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 45,
+    "trust_tier": "unverified",
+    "bed_types": {
+      "maternity": {
+        "total": 30,
+        "available": 0,
+        "overflow": 0
+      },
+      "pediatric": {
+        "total": 10,
+        "available": 0,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Reddington Hospital Lekki",
+    "slug": "reddington-lekki",
+    "latitude": 6.434,
+    "longitude": 3.514,
+    "address": "12 Idowu Martins Street, Victoria Island / Lekki",
+    "lga": "Eti-Osa",
+    "city": "Lagos",
+    "phone": "+2341234500017",
+    "whatsapp_number": "+2349060000017",
+    "email": "info@reddingtonhospital.com",
+    "hospital_type": "private",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": true,
+    "has_ventilators": true,
+    "has_dialysis": true,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 120,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 10,
+        "available": 6,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 50,
+        "available": 30,
+        "overflow": 0
+      },
+      "maternity": {
+        "total": 15,
+        "available": 9,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 10,
+        "available": 6,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 8,
+        "available": 4,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Lagoon Hospitals (Ikeja)",
+    "slug": "lagoon-ikeja",
+    "latitude": 6.594,
+    "longitude": 3.354,
+    "address": "2B Aromire Street, off Allen Avenue, Ikeja",
+    "lga": "Ikeja",
+    "city": "Lagos",
+    "phone": "+2341234500018",
+    "whatsapp_number": "+2349060000018",
+    "email": "info@lagoonhospitals.com",
+    "hospital_type": "private",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": true,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 100,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 8,
+        "available": 4,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 45,
+        "available": 27,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 10,
+        "available": 6,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 6,
+        "available": 3,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Evercare Hospital Lekki",
+    "slug": "evercare-lekki",
+    "latitude": 6.431,
+    "longitude": 3.536,
+    "address": "Admiralty Way, Lekki Phase 1",
+    "lga": "Eti-Osa",
+    "city": "Lagos",
+    "phone": "+2341234500019",
+    "whatsapp_number": "+2349060000019",
+    "email": "info@evercare.ng",
+    "hospital_type": "private",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": true,
+    "has_ventilators": true,
+    "has_dialysis": true,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 165,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 15,
+        "available": 9,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 70,
+        "available": 42,
+        "overflow": 0
+      },
+      "maternity": {
+        "total": 20,
+        "available": 12,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 12,
+        "available": 7,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 10,
+        "available": 6,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "First Cardiology Consultants",
+    "slug": "first-cardiology-ikoyi",
+    "latitude": 6.4495,
+    "longitude": 3.431,
+    "address": "2 Burdillon Road, Ikoyi",
+    "lga": "Eti-Osa",
+    "city": "Lagos",
+    "phone": "+2341234500020",
+    "whatsapp_number": "+2349060000020",
+    "email": "info@firstcardiology.com",
+    "hospital_type": "specialist",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": true,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 50,
+    "trust_tier": "verified",
+    "bed_types": {
+      "icu": {
+        "total": 10,
+        "available": 2,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 25,
+        "available": 5,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 6,
+        "available": 1,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "St. Nicholas Hospital",
+    "slug": "st-nicholas-island",
+    "latitude": 6.454,
+    "longitude": 3.411,
+    "address": "57 Campbell Street, Lagos Island",
+    "lga": "Lagos Island",
+    "city": "Lagos",
+    "phone": "+2341234500021",
+    "whatsapp_number": "+2349060000021",
+    "email": "info@stnicholas.com.ng",
+    "hospital_type": "private",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": true,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 90,
+    "trust_tier": "active",
+    "bed_types": {
+      "icu": {
+        "total": 6,
+        "available": 1,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 40,
+        "available": 8,
+        "overflow": 2
+      },
+      "emergency": {
+        "total": 8,
+        "available": 1,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 5,
+        "available": 0,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Onikan Health Centre",
+    "slug": "onikan-health-centre",
+    "latitude": 6.4525,
+    "longitude": 3.405,
+    "address": "King George V Road, Onikan, Lagos Island",
+    "lga": "Lagos Island",
+    "city": "Lagos",
+    "phone": "+2341234500022",
+    "whatsapp_number": "+2349060000022",
+    "email": "info@onikanhc.lg.gov.ng",
+    "hospital_type": "clinic",
+    "has_icu": false,
+    "has_theatre": false,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 25,
+    "trust_tier": "active",
+    "bed_types": {
+      "ward": {
+        "total": 18,
+        "available": 4,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 5,
+        "available": 1,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "EKO Hospital (Ikeja)",
+    "slug": "eko-hospital-ikeja",
+    "latitude": 6.601,
+    "longitude": 3.342,
+    "address": "31 Mobolaji Bank Anthony Way, Ikeja",
+    "lga": "Ikeja",
+    "city": "Lagos",
+    "phone": "+2341234500023",
+    "whatsapp_number": "+2349060000023",
+    "email": "info@ekohospitals.com",
+    "hospital_type": "private",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": true,
+    "has_ct_scanner": true,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 80,
+    "trust_tier": "active",
+    "bed_types": {
+      "icu": {
+        "total": 5,
+        "available": 1,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 35,
+        "available": 6,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 8,
+        "available": 2,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 5,
+        "available": 1,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Orile-Agege Specialist Hospital",
+    "slug": "orile-agege-specialist",
+    "latitude": 6.62,
+    "longitude": 3.33,
+    "address": "Old Otta Road, Agege",
+    "lga": "Ikeja",
+    "city": "Lagos",
+    "phone": "+2341234500024",
+    "whatsapp_number": "+2349060000024",
+    "email": "info@orileagege.lg.gov.ng",
+    "hospital_type": "specialist",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": true,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 100,
+    "trust_tier": "active",
+    "bed_types": {
+      "icu": {
+        "total": 5,
+        "available": 0,
+        "overflow": 1
+      },
+      "ward": {
+        "total": 50,
+        "available": 3,
+        "overflow": 2
+      },
+      "emergency": {
+        "total": 10,
+        "available": 0,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Federal Neuro-Psychiatric Hospital Yaba",
+    "slug": "neuro-psych-yaba",
+    "latitude": 6.512,
+    "longitude": 3.371,
+    "address": "Harvey Road, Yaba",
+    "lga": "Surulere",
+    "city": "Lagos",
+    "phone": "+2341234500025",
+    "whatsapp_number": "+2349060000025",
+    "email": "info@neuropsychyaba.gov.ng",
+    "hospital_type": "specialist",
+    "has_icu": false,
+    "has_theatre": false,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": false,
+    "has_ultrasound": false,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": true,
+    "total_beds": 200,
+    "trust_tier": "verified",
+    "bed_types": {
+      "psychiatric": {
+        "total": 150,
+        "available": 12,
+        "overflow": 5
+      },
+      "ward": {
+        "total": 40,
+        "available": 6,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Ikorodu Eye Centre",
+    "slug": "ikorodu-eye-centre",
+    "latitude": 6.574,
+    "longitude": 3.431,
+    "address": "Benson Road, Oworonshoki",
+    "lga": "Kosofe",
+    "city": "Lagos",
+    "phone": "+2341234500026",
+    "whatsapp_number": "+2349060000026",
+    "email": "info@ikorodueye.lg.gov.ng",
+    "hospital_type": "specialist",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": false,
+    "has_xray": false,
+    "has_ultrasound": false,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 25,
+    "trust_tier": "unverified",
+    "bed_types": {
+      "ward": {
+        "total": 15,
+        "available": 3,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 5,
+        "available": 1,
+        "overflow": 0
+      }
+    },
+    "_stale": true
+  },
+  {
+    "name": "Mushin Comprehensive Health Centre",
+    "slug": "mushin-chc",
+    "latitude": 6.54,
+    "longitude": 3.346,
+    "address": "Agege Motor Road, Mushin",
+    "lga": "Mushin",
+    "city": "Lagos",
+    "phone": "+2341234500027",
+    "whatsapp_number": "+2349060000027",
+    "email": "info@mushinchc.lg.gov.ng",
+    "hospital_type": "clinic",
+    "has_icu": false,
+    "has_theatre": false,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 20,
+    "trust_tier": "unverified",
+    "bed_types": {
+      "ward": {
+        "total": 14,
+        "available": 0,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 4,
+        "available": 0,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Ifako Ijaiye Specialist Clinic",
+    "slug": "ifako-ijaiye-clinic",
+    "latitude": 6.631,
+    "longitude": 3.319,
+    "address": "Iju Road, Ifako-Ijaiye",
+    "lga": "Ikeja",
+    "city": "Lagos",
+    "phone": "+2341234500028",
+    "whatsapp_number": "+2349060000028",
+    "email": "info@ifakoclinic.lg.gov.ng",
+    "hospital_type": "specialist",
+    "has_icu": false,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": true,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 40,
+    "trust_tier": "active",
+    "bed_types": {
+      "ward": {
+        "total": 25,
+        "available": 5,
+        "overflow": 1
+      },
+      "emergency": {
+        "total": 6,
+        "available": 1,
+        "overflow": 0
+      }
+    }
+  },
+  {
+    "name": "Ketu-Ojota Health Centre",
+    "slug": "ketu-ojota-hc",
+    "latitude": 6.583,
+    "longitude": 3.391,
+    "address": "Mile 12 Road, Ketu, Kosofe",
+    "lga": "Kosofe",
+    "city": "Lagos",
+    "phone": "+2341234500029",
+    "whatsapp_number": "+2349060000029",
+    "email": "info@ketuojota.lg.gov.ng",
+    "hospital_type": "clinic",
+    "has_icu": false,
+    "has_theatre": false,
+    "has_blood_bank": false,
+    "has_ct_scanner": false,
+    "has_mri": false,
+    "has_ventilators": false,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 18,
+    "trust_tier": "active",
+    "bed_types": {
+      "ward": {
+        "total": 12,
+        "available": 2,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 4,
+        "available": 0,
+        "overflow": 0
+      }
+    },
+    "_stale": true
+  },
+  {
+    "name": "Lekki British Hospital",
+    "slug": "lekki-british",
+    "latitude": 6.441,
+    "longitude": 3.487,
+    "address": "1 Admiralty Road, Lekki Phase 1",
+    "lga": "Eti-Osa",
+    "city": "Lagos",
+    "phone": "+2341234500030",
+    "whatsapp_number": "+2349060000030",
+    "email": "info@lekkibritish.com",
+    "hospital_type": "specialist",
+    "has_icu": true,
+    "has_theatre": true,
+    "has_blood_bank": false,
+    "has_ct_scanner": true,
+    "has_mri": false,
+    "has_ventilators": true,
+    "has_dialysis": false,
+    "has_oxygen": true,
+    "has_xray": true,
+    "has_ultrasound": true,
+    "has_pharmacy": true,
+    "has_lab": true,
+    "has_ambulance": false,
+    "total_beds": 55,
+    "trust_tier": "active",
+    "bed_types": {
+      "icu": {
+        "total": 4,
+        "available": 1,
+        "overflow": 0
+      },
+      "ward": {
+        "total": 25,
+        "available": 7,
+        "overflow": 0
+      },
+      "emergency": {
+        "total": 6,
+        "available": 2,
+        "overflow": 0
+      },
+      "surgical": {
+        "total": 4,
+        "available": 1,
+        "overflow": 0
+      }
+    }
+  }
+]

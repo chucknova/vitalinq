@@ -1,0 +1,77 @@
+"""
+BedSignal API — main application entry point.
+
+Run:
+    uvicorn app.main:app --reload --port 8000
+
+Docs:
+    http://localhost:8000/docs
+"""
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
+# from app.routers import search
+# from app.routers import search, hospitals
+from app.routers import search, hospitals, webhooks
+
+# ---------------------------------------------------------------------------
+# Lifespan — runs on startup and shutdown
+# This is where background tasks (APScheduler) will be started later.
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ──
+    print("🟢 BedSignal API starting up...")
+    print(f"   Environment: {settings.APP_ENV}")
+    print(f"   Frontend:    {settings.FRONTEND_URL}")
+    yield
+    # ── Shutdown ──
+    print("🔴 BedSignal API shutting down...")
+
+
+# ---------------------------------------------------------------------------
+# App instance
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="BedSignal API",
+    description="Real-time hospital bed availability for Lagos",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# CORS — let the frontend talk to this backend
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        settings.FRONTEND_URL,          # http://localhost:5173 in dev
+        "http://localhost:5173",         # fallback in case .env differs
+        "https://bedsignal.vercel.app",  # production frontend (update later)
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "service": "bedsignal-api"}
+
+# ---------------------------------------------------------------------------
+# Routers will be added here as you build them:
+#
+# from app.routers import search, webhooks, handshakes, hospitals, dispatch
+app.include_router(search.router, prefix="/api")
+app.include_router(hospitals.router, prefix="/api")
+app.include_router(webhooks.router, prefix="/api")
+# app.include_router(handshakes.router, prefix="/api")
+# app.include_router(dispatch.router, prefix="/api")
+# ---------------------------------------------------------------------------
