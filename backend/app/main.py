@@ -51,9 +51,12 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        settings.FRONTEND_URL,          # http://localhost:5173 in dev
-        "http://localhost:5173",         # fallback in case .env differs
-        "https://bedsignal.vercel.app",  # production frontend (update later)
+        settings.FRONTEND_URL,
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:5176",
+        "https://bedsignal.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],

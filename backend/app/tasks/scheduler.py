@@ -44,15 +44,15 @@ def start_scheduler():
     )
 
     # ── Future tasks (uncomment as you build them) ────────────
-    #
-    # from app.tasks.followup import send_followups
-    # scheduler.add_job(
-    #     send_followups,
-    #     trigger=IntervalTrigger(minutes=5),
-    #     id="ghost_bed_followup",
-    #     name="Ghost Bed Detection follow-ups",
-    #     replace_existing=True,
-    # )
+    
+    from app.tasks.followup import send_followups
+    scheduler.add_job(
+        send_followups,
+        trigger=IntervalTrigger(minutes=5),
+        id="ghost_bed_followup",
+        name="Ghost Bed Detection follow-ups",
+        replace_existing=True,
+    )
     #
     # from app.tasks.nudge import send_checkins
     # scheduler.add_job(

@@ -34,15 +34,17 @@ router = APIRouter(prefix="/handshakes", tags=["Handshakes"])
 async def create_handshake_endpoint(request: HandshakeCreateRequest):
     """Create a new bed reservation request."""
 
-    # Verify hospital exists
+    # Verify hospital exists and get WhatsApp number
     hospital = (
         supabase.table("hospitals")
-        .select("id, name")
+        .select("id, name, whatsapp_number, address")
         .eq("id", request.receiving_hospital_id)
         .execute()
     )
     if not hospital.data:
         raise HTTPException(status_code=404, detail="Hospital not found")
+
+    h = hospital.data[0]
 
     handshake = await create_handshake(
         receiving_hospital_id=request.receiving_hospital_id,
@@ -54,12 +56,28 @@ async def create_handshake_endpoint(request: HandshakeCreateRequest):
         hold_duration_min=request.hold_duration_min,
     )
 
+    # Notify the hospital via WhatsApp
+    from app.services.whatsapp import send_buttons
+    hospital_phone = h.get("whatsapp_number")
+    if hospital_phone:
+        bed_label = request.bed_type.upper()
+        await send_buttons(hospital_phone, (
+            f"🚨 *Incoming Patient — Bed Hold Request*\n\n"
+            f"Bed needed: *{bed_label}*\n"
+            f"Patient: {request.patient_summary or 'No details provided'}\n"
+            f"Transfer code: *{handshake['transfer_code']}*\n\n"
+            f"Hold expires in {request.hold_duration_min} min if accepted."
+        ), [
+            ("✅ Accept", f"accept_handshake_{handshake['id']}"),
+            ("❌ Decline", f"decline_handshake_{handshake['id']}"),
+        ])
+
     return HandshakeCreateResponse(
         handshake_id=handshake["id"],
         transfer_code=handshake["transfer_code"],
         status=handshake["status"],
-        receiving_hospital=hospital.data[0]["name"],
-        message=f"Bed hold request sent to {hospital.data[0]['name']}. Awaiting confirmation.",
+        receiving_hospital=h["name"],
+        message=f"Bed hold request sent to {h['name']}. Awaiting confirmation.",
     )
 
 

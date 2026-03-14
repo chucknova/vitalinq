@@ -1,0 +1,5 @@
+@import "tailwindcss" source("../");
+
+body {
+  font-family: 'Figtree', sans-serif;
+}

@@ -21,6 +21,7 @@ from app.services.handshake_mgr import (
     create_handshake,
     accept_handshake,
     decline_handshake,
+    complete_handshake,
     get_handshake_detail,
 )
 from app.services.hospital_flows import (
@@ -178,7 +179,16 @@ async def route_message(
             return
 
     # ==================================================================
-    # 7. FREE-TEXT BED REPORT (hospital only)
+    # 7. TRANSFER CODE COMPLETION (hospital only)
+    #    If a hospital types a 6-char alphanumeric code like "K7M2X9",
+    #    treat it as a patient arrival confirmation.
+    # ==================================================================
+    if hospital and re.match(r"^[A-Z2-9]{6}$", body_upper):
+        await handle_transfer_code_completion(phone, hospital, body_upper)
+        return
+
+    # ==================================================================
+    # 8. FREE-TEXT BED REPORT (hospital only)
     # ==================================================================
     if hospital:
         matches = BED_REPORT_PATTERN.findall(body_stripped)
@@ -232,13 +242,11 @@ async def handle_button(phone: str, payload: str):
 
     elif payload.startswith("yes_followup_"):
         query_id = payload.replace("yes_followup_", "")
-        print(f"   → Positive verification for query {query_id}")
-        # TODO: Phase 7 — handle_verification(query_id, "positive")
+        await handle_followup_response(phone, query_id, "positive")
 
     elif payload.startswith("no_followup_"):
         query_id = payload.replace("no_followup_", "")
-        print(f"   → Negative verification for query {query_id}")
-        # TODO: Phase 7 — handle_verification(query_id, "negative")
+        await handle_followup_response(phone, query_id, "negative")
 
     else:
         print(f"   → Unknown button: {payload}")
@@ -650,6 +658,88 @@ async def handle_handshake_decline(phone: str, handshake_id: str):
         await send_text(requester_phone, (
             "Send *EMERGENCY* to search again, or share your location "
             "to find other available hospitals."
+        ))
+
+
+async def handle_transfer_code_completion(phone: str, hospital: dict, code: str):
+    """
+    Hospital typed a transfer code — patient has arrived.
+    Look up the handshake by code, verify it belongs to this hospital, complete it.
+    """
+    hospital_id = hospital["id"]
+    hospital_name = hospital["name"]
+
+    # Find the handshake by transfer code
+    result = (
+        supabase.table("handshakes")
+        .select("*")
+        .eq("transfer_code", code)
+        .eq("receiving_hospital_id", hospital_id)
+        .eq("status", "accepted")
+        .execute()
+    )
+
+    if not result.data:
+        # Maybe it's not a transfer code at all — treat as unknown
+        await handle_unknown(phone, hospital)
+        return
+
+    handshake = result.data[0]
+    handshake_id = handshake["id"]
+    requester_phone = handshake["requesting_party_phone"]
+
+    # Complete it
+    completed = await complete_handshake(handshake_id, code)
+    if not completed:
+        await send_text(phone, f"Could not complete handshake for code *{code}*. It may have already been completed or expired.")
+        return
+
+    # Notify hospital
+    await send_text(phone, (
+        f"🏁 *Patient arrived — code {code} confirmed*\n\n"
+        f"Bed hold at {hospital_name} is now complete.\n"
+        f"Thank you for using BedSignal."
+    ))
+
+    # Notify requester
+    await send_text(requester_phone, (
+        f"🏁 *Arrival confirmed at {hospital_name}*\n\n"
+        f"Your transfer code {code} has been verified.\n"
+        f"Wishing a speedy recovery."
+    ))
+
+
+async def handle_followup_response(phone: str, query_id: str, signal_value: str):
+    """Handle Yes/No response to Ghost Bed Detection follow-up."""
+    from app.services.verification import handle_verification_response
+
+    result = await handle_verification_response(query_id, signal_value, reporter_phone=phone)
+
+    if signal_value == "positive":
+        await send_text(phone, "Thank you. Glad you got the care you needed. 🙏")
+    else:
+        # Fetch hospital name for the message
+        query = (
+            supabase.table("queries")
+            .select("selected_hospital_id")
+            .eq("id", query_id)
+            .execute()
+        )
+        hospital_name = "the hospital"
+        if query.data and query.data[0].get("selected_hospital_id"):
+            hospital = (
+                supabase.table("hospitals")
+                .select("name")
+                .eq("id", query.data[0]["selected_hospital_id"])
+                .execute()
+            )
+            if hospital.data:
+                hospital_name = hospital.data[0]["name"]
+
+        await send_text(phone, (
+            f"Sorry to hear that. This has been flagged and will "
+            f"affect {hospital_name}'s accuracy score.\n\n"
+            f"Thank you for helping keep BedSignal data accurate."
         ))
 
 
