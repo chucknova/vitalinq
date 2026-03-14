@@ -53,24 +53,24 @@ def start_scheduler():
         name="Ghost Bed Detection follow-ups",
         replace_existing=True,
     )
-    #
-    # from app.tasks.nudge import send_checkins
-    # scheduler.add_job(
-    #     send_checkins,
-    #     trigger=IntervalTrigger(minutes=15),
-    #     id="hospital_checkin",
-    #     name="Hospital 6-hour check-in sender",
-    #     replace_existing=True,
-    # )
-    #
-    # from app.tasks.freshness import update_freshness_scores
-    # scheduler.add_job(
-    #     update_freshness_scores,
-    #     trigger=IntervalTrigger(minutes=15),
-    #     id="freshness_updater",
-    #     name="Freshness score updater",
-    #     replace_existing=True,
-    # )
+
+    from app.tasks.nudge import send_checkins
+    scheduler.add_job(
+        send_checkins,
+        trigger=IntervalTrigger(minutes=15),
+        id="hospital_checkin",
+        name="Hospital 6-hour check-in sender",
+        replace_existing=True,
+    )
+
+    from app.tasks.freshness import update_freshness_scores
+    scheduler.add_job(
+        update_freshness_scores,
+        trigger=IntervalTrigger(minutes=15),
+        id="freshness_updater",
+        name="Freshness score updater",
+        replace_existing=True,
+    )
 
     scheduler.start()
     print("⏱️  Background scheduler started")

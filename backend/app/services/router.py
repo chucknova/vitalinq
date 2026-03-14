@@ -183,9 +183,12 @@ async def route_message(
     #    If a hospital types a 6-char alphanumeric code like "K7M2X9",
     #    treat it as a patient arrival confirmation.
     # ==================================================================
-    if hospital and re.match(r"^[A-Z2-9]{6}$", body_upper):
-        await handle_transfer_code_completion(phone, hospital, body_upper)
-        return
+    if hospital:
+        code_match = re.match(r"^[A-Z2-9]{6}$", body_upper)
+        print(f"   🔍 Transfer code check: body_upper='{body_upper}' len={len(body_upper)} match={code_match is not None}")
+        if code_match:
+            await handle_transfer_code_completion(phone, hospital, body_upper)
+            return
 
     # ==================================================================
     # 8. FREE-TEXT BED REPORT (hospital only)
@@ -664,29 +667,52 @@ async def handle_handshake_decline(phone: str, handshake_id: str):
 async def handle_transfer_code_completion(phone: str, hospital: dict, code: str):
     """
     Hospital typed a transfer code — patient has arrived.
-    Look up the handshake by code, verify it belongs to this hospital, complete it.
+    Look up the handshake by code, verify it belongs to this hospital.
+
+    Handles two scenarios:
+      - Status "accepted": patient arriving during hold → complete it
+      - Status "requested": hospital typing code instead of tapping Accept
+        (patient is already here) → accept AND complete in one step
     """
     hospital_id = hospital["id"]
     hospital_name = hospital["name"]
 
-    # Find the handshake by transfer code
+    # Find the handshake by transfer code — check both accepted and requested
+    print(f"   🔍 Looking up: code={code} hospital_id={hospital_id[:8]}")
+
     result = (
         supabase.table("handshakes")
         .select("*")
         .eq("transfer_code", code)
         .eq("receiving_hospital_id", hospital_id)
-        .eq("status", "accepted")
         .execute()
     )
 
-    if not result.data:
-        # Maybe it's not a transfer code at all — treat as unknown
-        await handle_unknown(phone, hospital)
+    print(f"   🔍 Found {len(result.data)} handshakes")
+    if result.data:
+        print(f"   🔍 Status: {result.data[0]['status']}")
+
+    # Filter to actionable statuses
+    actionable = [h for h in result.data if h["status"] in ("accepted", "requested")]
+
+    if not actionable:
+        if result.data:
+            # Found handshake but wrong status (already completed/expired/declined)
+            status = result.data[0]["status"]
+            await send_text(phone, f"This transfer code (*{code}*) has already been {status}.")
+        else:
+            # No handshake found at all — maybe not a transfer code
+            await handle_unknown(phone, hospital)
         return
 
-    handshake = result.data[0]
+    handshake = actionable[0]
     handshake_id = handshake["id"]
     requester_phone = handshake["requesting_party_phone"]
+    current_status = handshake["status"]
+
+    # If still requested, accept it first (patient is already here)
+    if current_status == "requested":
+        await accept_handshake(handshake_id)
 
     # Complete it
     completed = await complete_handshake(handshake_id, code)
