@@ -7,8 +7,8 @@ import HospitalMarker from './HospitalMarker';
 import HospitalCard from './HospitalCard';
 import SearchPanel from './SearchPanel';
 import WelcomeCard from './WelcomeCard';
-import TimeSlider from './TimeSlider';
-import MapLegend from './MapLegend';
+// import TimeSlider from './TimeSlider';
+// import MapLegend from './MapLegend';
 
 const LAGOS = { latitude: 6.5244, longitude: 3.3792 };
 
@@ -99,7 +99,7 @@ export default function PulseMap() {
           mapboxAccessToken={import.meta.env.VITE_MAPBOX_TOKEN}
           initialViewState={{ ...LAGOS, zoom: 11 }}
           style={{ width: '100%', height: '100%' }}
-          mapStyle="mapbox://styles/mapbox/dark-v11"
+          mapStyle="mapbox://styles/mapbox/standard"
         >
           <NavigationControl position="bottom-right" showCompass={false} />
 
@@ -158,10 +158,10 @@ export default function PulseMap() {
         </div>
 
         {/* Legend */}
-        <MapLegend />
+        {/* <MapLegend /> */}
 
         {/* Time Slider */}
-        <TimeSlider onPredictionsChange={setPredictions} />
+        {/* <TimeSlider onPredictionsChange={setPredictions} /> */}
 
         {/* Hospital count */}
         <div className="absolute bottom-6 left-5 z-10 bg-[#0d1320]/80 backdrop-blur-sm text-gray-400 px-3 py-1.5 rounded-full text-xs flex items-center gap-2 border border-gray-800/50">

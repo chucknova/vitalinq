@@ -2,21 +2,25 @@ import { useState, useEffect, useRef } from 'react';
 import api from '../lib/api';
 
 /**
- * useHandshake — polls a handshake's status until it resolves.
+ * useHandshake — polls a handshake's status and manages countdown timer.
  *
- * Starts polling when handshakeId is set. Stops when status
- * reaches a terminal state (accepted, declined, expired, completed).
- * Polls every 3 seconds for snappy UI updates.
+ * Keeps polling through "accepted" (so it can detect "completed").
+ * Only stops on truly terminal states: declined, expired, completed.
+ * Manages a local countdown timer that ticks every second for smooth UI.
  */
 export default function useHandshake(handshakeId) {
   const [handshake, setHandshake] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const intervalRef = useRef(null);
+  const [countdown, setCountdown] = useState(null);
+  const pollRef = useRef(null);
+  const timerRef = useRef(null);
 
+  // Polling
   useEffect(() => {
     if (!handshakeId) {
       setHandshake(null);
+      setCountdown(null);
       return;
     }
 
@@ -29,11 +33,17 @@ export default function useHandshake(handshakeId) {
         setHandshake(res.data);
         setLoading(false);
 
-        // Stop polling on terminal states
-        const terminal = ['accepted', 'declined', 'expired', 'completed'];
+        // Sync countdown from server on each poll
+        if (res.data.status === 'accepted' && res.data.time_remaining_sec > 0) {
+          setCountdown(res.data.time_remaining_sec);
+        }
+
+        // Only stop polling on truly terminal states
+        const terminal = ['declined', 'expired', 'completed'];
         if (terminal.includes(res.data.status)) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+          setCountdown(null);
         }
       } catch (err) {
         console.error('Handshake poll failed:', err);
@@ -45,15 +55,35 @@ export default function useHandshake(handshakeId) {
     // First fetch immediately
     poll();
 
-    // Then poll every 3 seconds
-    intervalRef.current = setInterval(poll, 3000);
+    // Poll every 3 seconds
+    pollRef.current = setInterval(poll, 3000);
 
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
+      if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [handshakeId]);
 
-  return { handshake, loading, error };
+  // Local countdown timer — ticks every second for smooth UI
+  useEffect(() => {
+    if (countdown === null || countdown <= 0) {
+      if (timerRef.current) clearInterval(timerRef.current);
+      return;
+    }
+
+    timerRef.current = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [countdown !== null && countdown > 0]);
+
+  return { handshake, loading, error, countdown };
 }

@@ -1,13 +1,13 @@
 /**
- * HospitalMarker — a tangible, numbered badge on the map.
+ * HospitalMarker — clean badge-style marker like Kiwi.com price tags.
  *
- * Instead of abstract dots, shows a hospital icon with the total
- * available bed count. Color-coded by capacity. Glows when fresh.
- * When search results are active, non-matching hospitals dim out
- * and matched ones show their rank number instead.
+ * Shows bed count in a rounded pill, color-coded by capacity.
+ * On hover, expands to show hospital name.
+ * When search results are active, shows rank number instead.
  */
 
-import { Heart } from 'lucide-react';
+import { useState } from 'react';
+import { Bed } from 'lucide-react';
 
 function getStats(hospital) {
   const beds = hospital.beds || [];
@@ -39,120 +39,148 @@ function getColor(hospital) {
   const pct = totalAvailable / totalBeds;
   if (pct > 0.5) return 'green';
   if (pct > 0.1 || hasOverflow) return 'amber';
-  if (totalAvailable > 0) return 'red';
   return 'red';
 }
 
-const THEME = {
+const THEMES = {
   green: {
-    bg: 'bg-emerald-500',
-    border: 'border-emerald-400',
-    glow: 'shadow-[0_0_12px_rgba(16,185,129,0.5)]',
-    text: 'text-white',
-    ring: 'bg-emerald-400/30',
+    bg: '#065f46',
+    border: '#10b981',
+    text: '#ecfdf5',
+    shadow: 'rgba(16, 185, 129, 0.3)',
+    hoverBg: '#047857',
   },
   amber: {
-    bg: 'bg-amber-500',
-    border: 'border-amber-400',
-    glow: 'shadow-[0_0_12px_rgba(245,158,11,0.5)]',
-    text: 'text-white',
-    ring: 'bg-amber-400/30',
+    bg: '#78350f',
+    border: '#f59e0b',
+    text: '#fefce8',
+    shadow: 'rgba(245, 158, 11, 0.3)',
+    hoverBg: '#92400e',
   },
   red: {
-    bg: 'bg-red-500',
-    border: 'border-red-400',
-    glow: 'shadow-[0_0_12px_rgba(239,68,68,0.5)]',
-    text: 'text-white',
-    ring: 'bg-red-400/30',
+    bg: '#7f1d1d',
+    border: '#ef4444',
+    text: '#fef2f2',
+    shadow: 'rgba(239, 68, 68, 0.3)',
+    hoverBg: '#991b1b',
   },
   stale: {
-    bg: 'bg-gray-600',
-    border: 'border-gray-500',
-    glow: '',
-    text: 'text-gray-300',
-    ring: '',
+    bg: '#1f2937',
+    border: '#6b7280',
+    text: '#d1d5db',
+    shadow: 'rgba(107, 114, 128, 0.2)',
+    hoverBg: '#374151',
   },
 };
 
-// Inject pulse animation once
-if (typeof document !== 'undefined' && !document.getElementById('bs-marker-css')) {
+// Inject glow animation once
+if (typeof document !== 'undefined' && !document.getElementById('bs-badge-css')) {
   const style = document.createElement('style');
-  style.id = 'bs-marker-css';
+  style.id = 'bs-badge-css';
   style.textContent = `
-    @keyframes bs-glow {
-      0%, 100% { opacity: 0.5; transform: scale(1); }
-      50% { opacity: 0; transform: scale(1.8); }
+    @keyframes bs-badge-glow {
+      0%, 100% { box-shadow: 0 1px 4px var(--bs-shadow); }
+      50% { box-shadow: 0 1px 12px var(--bs-shadow), 0 0 20px var(--bs-shadow); }
     }
-    .bs-glow-fast .bs-ring { animation: bs-glow 2s ease-out infinite; }
-    .bs-glow-med .bs-ring { animation: bs-glow 4s ease-out infinite; }
-    .bs-glow-slow .bs-ring { animation: bs-glow 7s ease-out infinite; }
+    .bs-badge-fresh { animation: bs-badge-glow 2s ease-in-out infinite; }
+    .bs-badge-warm { animation: bs-badge-glow 4s ease-in-out infinite; }
   `;
   document.head.appendChild(style);
 }
 
 export default function HospitalMarker({ hospital, dimmed, rank }) {
+  const [hovered, setHovered] = useState(false);
   const color = getColor(hospital);
-  const theme = THEME[color];
+  const theme = THEMES[color];
   const { totalAvailable } = getStats(hospital);
   const freshness = getFreshnessHours(hospital);
 
-  const glowClass = freshness < 2 ? 'bs-glow-fast'
-    : freshness < 6 ? 'bs-glow-med'
-    : freshness < 8 ? 'bs-glow-slow'
+  const isRanked = rank !== null && rank !== undefined;
+  const displayText = isRanked ? `#${rank}` : totalAvailable > 0 ? totalAvailable : '0';
+
+  const glowClass = freshness < 2 ? 'bs-badge-fresh'
+    : freshness < 6 ? 'bs-badge-warm'
     : '';
 
-  const displayNumber = rank || totalAvailable;
-  const isRanked = rank !== null && rank !== undefined;
+  // Short name for hover tooltip
+  const shortName = hospital.name?.length > 25
+    ? hospital.name.substring(0, 23) + '...'
+    : hospital.name;
 
   return (
     <div
-      className={`relative cursor-pointer transition-all duration-300 ${glowClass} ${
-        dimmed ? 'opacity-20 scale-75' : 'opacity-100 scale-100'
+      className={`relative cursor-pointer transition-all duration-200 ${
+        dimmed ? 'opacity-20 scale-90' : 'opacity-100 scale-100'
       }`}
-      style={{ width: 36, height: 42 }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{ zIndex: hovered ? 50 : dimmed ? 1 : 10 }}
     >
-      {/* Glow ring */}
-      {!dimmed && theme.ring && (
+      {/* ── Hover tooltip: hospital name ──────────────── */}
+      {hovered && !dimmed && (
         <div
-          className={`bs-ring absolute rounded-full ${theme.ring}`}
-          style={{ width: 36, height: 36, top: 0, left: 0 }}
-        />
+          className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 whitespace-nowrap pointer-events-none"
+          style={{ zIndex: 60 }}
+        >
+          <div
+            className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium"
+            style={{
+              backgroundColor: '#111827',
+              color: '#f3f4f6',
+              border: '1px solid rgba(75, 85, 99, 0.5)',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+            }}
+          >
+            {shortName}
+            <span className="text-gray-500 ml-1.5">·</span>
+            <span className="ml-1.5" style={{ color: theme.border }}>
+              {totalAvailable} {totalAvailable === 1 ? 'bed' : 'beds'}
+            </span>
+          </div>
+          {/* Arrow */}
+          <div
+            className="absolute left-1/2 -translate-x-1/2 w-0 h-0"
+            style={{
+              borderLeft: '5px solid transparent',
+              borderRight: '5px solid transparent',
+              borderTop: '5px solid #111827',
+            }}
+          />
+        </div>
       )}
 
-      {/* Pin body */}
+      {/* ── Badge ─────────────────────────────────────── */}
       <div
-        className={`absolute flex items-center justify-center rounded-full ${theme.bg} ${theme.border} border-2 ${!dimmed ? theme.glow : ''}`}
-        style={{ width: 32, height: 32, top: 0, left: 2 }}
+        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-2 border transition-all duration-200 ${glowClass}`}
+        style={{
+          backgroundColor: hovered ? theme.hoverBg : theme.bg,
+          borderColor: theme.border,
+          color: theme.text,
+          boxShadow: `0 1px 4px ${theme.shadow}`,
+          '--bs-shadow': theme.shadow,
+          minWidth: 32,
+          justifyContent: 'center',
+          transform: hovered ? 'scale(1.1)' : 'scale(1)',
+        }}
       >
-        {isRanked ? (
-          /* Rank number when in search results */
-          <span className={`text-xs font-bold ${theme.text}`}>
-            {rank}
-          </span>
-        ) : totalAvailable > 0 ? (
-          /* Bed count */
-          <span className={`text-xs font-bold ${theme.text}`}>
-            {totalAvailable > 99 ? '99+' : totalAvailable}
-          </span>
-        ) : (
-          /* No beds — show icon */
-          <Heart size={14} className={`${theme.text} opacity-60`} />
+        {/* Bed icon */}
+        {!isRanked && (
+          <Bed size={12} style={{ opacity: 0.7 }} />
         )}
+
+        {/* Count or rank */}
+        <span className="text-s font-bold leading-none">
+          {displayText}
+        </span>
       </div>
 
-      {/* Pin tail */}
+      {/* ── Pointer triangle ──────────────────────────── */}
       <div
-        className={`absolute left-1/2 -translate-x-1/2 w-0 h-0`}
+        className="absolute left-1/2 -translate-x-1/2 w-0 h-0"
         style={{
-          top: 30,
-          borderLeft: '5px solid transparent',
-          borderRight: '5px solid transparent',
-          borderTop: `6px solid ${
-            color === 'green' ? '#10b981'
-            : color === 'amber' ? '#f59e0b'
-            : color === 'red' ? '#ef4444'
-            : '#4b5563'
-          }`,
+          borderLeft: '4px solid transparent',
+          borderRight: '4px solid transparent',
+          borderTop: `5px solid ${theme.border}`,
         }}
       />
     </div>

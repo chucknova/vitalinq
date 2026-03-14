@@ -43,7 +43,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [codeCopied, setCodeCopied] = useState(false);
 
   // Live status polling
-  const { handshake, loading: handshakeLoading } = useHandshake(handshakeId);
+  const { handshake, loading: handshakeLoading, countdown } = useHandshake(handshakeId);
 
   // ── Search handlers ────────────────────────────────────
   async function handleTriageSearch(e) {
@@ -507,52 +507,96 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
           {/* Status display */}
           <div className="space-y-3">
-            <StatusStep
-              label="Reservation created"
-              status="done"
-              detail={selectedResult?.name}
-            />
-            <StatusStep
-              label="Hospital notified via WhatsApp"
-              status="done"
-            />
-            <StatusStep
-              label="Waiting for hospital response"
-              status={
-                !handshake || handshake.status === 'requested' ? 'active' :
-                handshake.status === 'accepted' ? 'done' :
-                handshake.status === 'declined' ? 'failed' : 'done'
-              }
-              detail={
-                !handshake || handshake.status === 'requested'
-                  ? 'This usually takes 1-3 minutes...'
-                  : undefined
-              }
-            />
+            {/* Completed — full arrival confirmation (replaces the step list) */}
+            {handshake?.status === 'completed' ? (
+              <div className="text-center py-4">
+                {/* Success animation circle */}
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-500/10 border-2 border-emerald-500/30 flex items-center justify-center">
+                  <CheckCircle2 size={32} className="text-emerald-400" />
+                </div>
 
-            {handshake?.status === 'accepted' && (
-              <StatusStep
-                label="Bed confirmed!"
-                status="done"
-                detail={`Held for ${handshake.time_remaining_sec ? Math.ceil(handshake.time_remaining_sec / 60) : 45} minutes`}
-                highlight
-              />
-            )}
+                <h3 className="text-white text-lg font-semibold mb-1">Arrival Confirmed</h3>
+                <p className="text-gray-400 text-sm mb-4">
+                  You have been checked in at<br />
+                  <span className="text-white font-medium">{selectedResult?.name || 'the hospital'}</span>
+                </p>
 
-            {handshake?.status === 'declined' && (
-              <StatusStep
-                label="Hospital could not hold a bed"
-                status="failed"
-                detail={handshake.declined_reason || 'Try another hospital'}
-              />
-            )}
+                {/* Transfer code (dimmed, for reference) */}
+                <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg px-4 py-3 mb-4 inline-block">
+                  <p className="text-emerald-400/60 text-[10px] uppercase tracking-wider mb-1">Transfer Code</p>
+                  <p className="text-emerald-300 text-xl font-mono font-bold tracking-widest">{transferCode}</p>
+                </div>
 
-            {handshake?.status === 'expired' && (
-              <StatusStep
-                label="Reservation expired"
-                status="failed"
-                detail="The hold time ran out"
-              />
+                <p className="text-gray-500 text-xs mb-6">
+                  The hospital has verified your code.<br />
+                  Wishing a speedy recovery.
+                </p>
+
+                <button
+                  onClick={handleReset}
+                  className="text-gray-500 hover:text-gray-300 text-xs transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              /* Normal step-by-step tracker */
+              <>
+                <StatusStep
+                  label="Reservation created"
+                  status="done"
+                  detail={selectedResult?.name}
+                />
+                <StatusStep
+                  label="Hospital notified via WhatsApp"
+                  status="done"
+                />
+                <StatusStep
+                  label="Waiting for hospital response"
+                  status={
+                    !handshake || handshake.status === 'requested' ? 'active' :
+                    handshake.status === 'accepted' ? 'done' :
+                    handshake.status === 'declined' ? 'failed' : 'done'
+                  }
+                  detail={
+                    !handshake || handshake.status === 'requested'
+                      ? 'This usually takes 1-3 minutes...'
+                      : undefined
+                  }
+                />
+
+                {handshake?.status === 'accepted' && (
+                  <>
+                    <StatusStep
+                      label="Bed confirmed!"
+                      status="done"
+                      detail={`Held for ${countdown ? Math.ceil(countdown / 60) : 45} minutes`}
+                      highlight
+                    />
+                    <StatusStep
+                      label="Awaiting your arrival"
+                      status="active"
+                      detail="Show your transfer code to the nurse on arrival"
+                    />
+                  </>
+                )}
+
+                {handshake?.status === 'declined' && (
+                  <StatusStep
+                    label="Hospital could not hold a bed"
+                    status="failed"
+                    detail={handshake.declined_reason || 'Try another hospital'}
+                  />
+                )}
+
+                {handshake?.status === 'expired' && (
+                  <StatusStep
+                    label="Reservation expired"
+                    status="failed"
+                    detail="The hold time ran out"
+                  />
+                )}
+              </>
             )}
           </div>
 
@@ -579,11 +623,11 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           )}
 
           {/* Countdown timer for accepted */}
-          {handshake?.status === 'accepted' && handshake?.time_remaining_sec > 0 && (
+          {handshake?.status === 'accepted' && countdown > 0 && (
             <div className="mt-4 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-center">
               <p className="text-amber-400 text-xs">Bed held for</p>
               <p className="text-amber-300 text-xl font-mono font-bold mt-1">
-                {Math.floor(handshake.time_remaining_sec / 60)}:{String(handshake.time_remaining_sec % 60).padStart(2, '0')}
+                {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
               </p>
               <p className="text-amber-400/60 text-[10px] mt-1">Please arrive before the hold expires</p>
             </div>

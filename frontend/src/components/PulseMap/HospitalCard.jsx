@@ -51,7 +51,7 @@ function getFreshnessColor(isoString) {
   return 'text-red-400';
 }
 
-export default function HospitalCard({ hospital }) {
+export default function HospitalCard({ hospital, onClose }) {
   const beds = hospital.beds || [];
   const equipment = hospital.equipment || [];
   const trust = TRUST_CONFIG[hospital.trust_tier] || TRUST_CONFIG.active;
@@ -67,12 +67,21 @@ export default function HospitalCard({ hospital }) {
   });
 
   return (
-    <div className="w-[310px] bg-[#0d1320] rounded-xl overflow-hidden border border-gray-700/50 shadow-2xl shadow-black/60">
+    <div className="w-[310px] bg-[#0d1320] rounded-xl overflow-hidden border border-gray-700/50 shadow-2xl shadow-black/60 relative">
 
       {/* ── Header ────────────────────────────────────── */}
       <div className="p-4 pb-3">
+        {/* Close button */}
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="absolute top-3 right-3 text-gray-600 hover:text-gray-300 transition-colors z-10"
+          >
+            <span className="text-lg leading-none">×</span>
+          </button>
+        )}
         <div className="flex items-start justify-between gap-2 mb-2">
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 pr-4">
             <h3 className="text-white font-semibold text-sm leading-tight truncate">
               {hospital.name}
             </h3>
