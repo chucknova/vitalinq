@@ -556,5 +556,112 @@ async def handle_unknown(phone: str, hospital: dict):
     await send_text(phone, (
         "I didn't understand that.\n\n"
         "Send *UPDATE* to start an interactive update.\n"
-        "Send *STATUS* to see your current data."
+        "Send *STATUS* to see your current data.\n"
+        "Send *DISCHARGE 2 ICU* to record discharges."
     ))
+
+
+# ---------------------------------------------------------------------------
+# DISCHARGE — increment bed availability
+# ---------------------------------------------------------------------------
+
+# Regex: DISCHARGE [optional count] [bed type]
+import re
+
+DISCHARGE_PATTERN = re.compile(
+    r"^discharge\s+(\d+)?\s*(icu|ward|maternity|mat|pediatric|ped|emergency|emerg|surgical|surg|psychiatric)\s*$",
+    re.IGNORECASE,
+)
+
+async def handle_discharge(phone: str, hospital: dict, body: str):
+    """
+    Handle DISCHARGE keyword — increment bed availability.
+    Format: DISCHARGE [count] [bed_type]
+    Examples: DISCHARGE 4 ICU, DISCHARGE WARD, DISCHARGE 2 MAT
+    """
+    hospital_id = hospital["id"]
+    name = hospital["name"]
+
+    match = DISCHARGE_PATTERN.match(body.strip())
+
+    if not match:
+        # Try to give a helpful error
+        await send_text(phone, (
+            "Please use format: *DISCHARGE [number] [bed type]*\n\n"
+            "Examples:\n"
+            "DISCHARGE 2 ICU\n"
+            "DISCHARGE 1 WARD\n"
+            "DISCHARGE 3 MATERNITY\n\n"
+            "Number is optional (defaults to 1)."
+        ))
+        return
+
+    count_str = match.group(1)
+    bed_type_raw = match.group(2).lower()
+
+    # Default count to 1
+    count = int(count_str) if count_str else 1
+
+    if count <= 0:
+        await send_text(phone, "Discharge count must be at least 1.")
+        return
+
+    # Resolve alias
+    bed_type = BED_TYPE_ALIASES.get(bed_type_raw, bed_type_raw)
+    label = BED_TYPE_LABELS.get(bed_type, bed_type)
+
+    # Fetch the bed record
+    bed_record = (
+        supabase.table("hospital_beds")
+        .select("id, available_count, total_count")
+        .eq("hospital_id", hospital_id)
+        .eq("bed_type", bed_type)
+        .execute()
+    )
+
+    if not bed_record.data:
+        # List valid bed types for this hospital
+        all_beds = get_hospital_beds(hospital_id)
+        valid_types = [BED_TYPE_LABELS.get(b["bed_type"], b["bed_type"]) for b in all_beds]
+        await send_text(phone, (
+            f"Unknown bed type: *{bed_type_raw}*\n\n"
+            f"Valid types at {name}:\n"
+            + "\n".join(f"  \u2022 {t}" for t in valid_types)
+        ))
+        return
+
+    bed = bed_record.data[0]
+    current = bed["available_count"] or 0
+    total = bed["total_count"] or 999
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Cap at total capacity
+    new_available = min(current + count, total)
+    actual_discharged = new_available - current
+    capped = actual_discharged < count
+
+    # Update bed record
+    supabase.table("hospital_beds").update({
+        "available_count": new_available,
+        "reported_at": now,
+    }).eq("id", bed["id"]).execute()
+
+    # Update hospital timestamps
+    supabase.table("hospitals").update({
+        "last_report_at": now,
+        "freshness_score": 1.0,
+        "updated_at": now,
+    }).eq("id", hospital_id).execute()
+
+    # Response
+    if capped:
+        await send_text(phone, (
+            f"\u26a0\ufe0f Discharged {actual_discharged} from {label} at {name}.\n"
+            f"(Capped at total capacity: {total})\n\n"
+            f"Now: *{new_available} available*"
+        ))
+    else:
+        await send_text(phone, (
+            f"\u2705 Discharged {actual_discharged} from {label} at {name}.\n\n"
+            f"Now: *{new_available} available*"
+        ))

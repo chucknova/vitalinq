@@ -36,6 +36,7 @@ from app.services.hospital_flows import (
     handle_status,
     handle_freetext_report,
     handle_unknown,
+    handle_discharge,
     send_bed_type_list,
 )
 
@@ -52,7 +53,7 @@ BED_REPORT_PATTERN = re.compile(
 )
 
 PANIC_KEYWORDS = {"emergency", "help", "sos", "urgent", "bed", "find"}
-HOSPITAL_KEYWORDS = {"status", "update"}
+HOSPITAL_KEYWORDS = {"status", "update", "discharge"}
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,8 @@ async def route_message(
             await handle_status(phone, hospital)
         elif first_word == "UPDATE":
             await handle_update_start(phone, hospital)
+        elif first_word == "DISCHARGE":
+            await handle_discharge(phone, hospital, body_stripped)
         return
 
     if first_word in {k.upper() for k in PANIC_KEYWORDS} and not hospital:
