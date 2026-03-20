@@ -1,18 +1,23 @@
-/**
- * SearchPanel — left sidebar with full emergency booking flow.
- *
- * Steps:
- *   1. Search (Smart Triage or Nearby)
- *   2. Results list (pick a hospital)
- *   3. Patient details (name, phone, condition)
- *   4. Live status tracker (polling handshake until resolved)
- */
-
 import { useState } from 'react';
 import {
-  Search, Brain, MapPin, ChevronLeft, ChevronRight, X,
-  Loader2, AlertTriangle, ArrowLeft, Phone, User, FileText,
-  CheckCircle2, Clock, XCircle, Navigation, Copy, Check
+  AlertTriangle,
+  ArrowLeft,
+  Brain,
+  Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Copy,
+  FileText,
+  Loader2,
+  MapPin,
+  Navigation,
+  Phone,
+  Search,
+  User,
+  X,
+  XCircle,
 } from 'lucide-react';
 import api from '../../lib/api';
 import useHandshake from '../../hooks/useHandshake';
@@ -24,7 +29,39 @@ const STEPS = {
   TRACKING: 'tracking',
 };
 
-export default function SearchPanel({ onResults, onClear, searchResults, hospitals, onHospitalSelect }) {
+const stepLabels = ['Search', 'Select', 'Details', 'Track'];
+const stepOrder = [STEPS.SEARCH, STEPS.RESULTS, STEPS.PATIENT, STEPS.TRACKING];
+
+function formatConditionCategory(value) {
+  if (!value) return 'Triage summary';
+  return value.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function formatFreshness(hours) {
+  if (hours == null) return null;
+  if (hours < 1) return `${Math.round(hours * 60)} min ago`;
+  return `${Math.round(hours)} h ago`;
+}
+
+function getBestBedSummary(beds = {}) {
+  const entries = Object.entries(beds);
+  if (!entries.length) return 'Capacity details unavailable';
+
+  const best = entries.find(([, data]) => data?.available > 0) || entries[0];
+  const [type, data] = best;
+
+  if (data?.available > 0) return `${data.available} ${type.toUpperCase()} beds available`;
+  if (data?.overflow > 0) return `${data.overflow} ${type.toUpperCase()} overflow slots`;
+  return `${type.toUpperCase()} currently full`;
+}
+
+export default function SearchPanel({
+  onResults,
+  onClear,
+  searchResults,
+  hospitals,
+  onHospitalSelect,
+}) {
   const [collapsed, setCollapsed] = useState(false);
   const [step, setStep] = useState(STEPS.SEARCH);
   const [mode, setMode] = useState('triage');
@@ -33,7 +70,6 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [triageAnalysis, setTriageAnalysis] = useState(null);
   const [error, setError] = useState(null);
 
-  // Booking state
   const [selectedResult, setSelectedResult] = useState(null);
   const [patientName, setPatientName] = useState('');
   const [patientPhone, setPatientPhone] = useState('');
@@ -42,10 +78,8 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [transferCode, setTransferCode] = useState(null);
   const [codeCopied, setCodeCopied] = useState(false);
 
-  // Live status polling
-  const { handshake, loading: handshakeLoading, countdown } = useHandshake(handshakeId);
+  const { handshake, countdown } = useHandshake(handshakeId);
 
-  // ── Search handlers ────────────────────────────────────
   async function handleTriageSearch(e) {
     e.preventDefault();
     if (!description.trim()) return;
@@ -55,7 +89,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     setTriageAnalysis(null);
 
     try {
-      let lat = 6.5244, lng = 3.3792; // Lagos fallback
+      let lat = 6.5244;
+      let lng = 3.3792;
+
       try {
         const pos = await new Promise((resolve, reject) =>
           navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 })
@@ -86,7 +122,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     setError(null);
 
     try {
-      let lat = 6.5244, lng = 3.3792;
+      let lat = 6.5244;
+      let lng = 3.3792;
+
       try {
         const pos = await new Promise((resolve, reject) =>
           navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 })
@@ -111,19 +149,18 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     }
   }
 
-  // ── Hospital selection ─────────────────────────────────
   function handleSelectHospital(result) {
     setSelectedResult(result);
-    const hospital = hospitals.find((h) => h.id === result.hospital_id);
+    const hospital = hospitals.find(hospitalItem => hospitalItem.id === result.hospital_id);
     if (hospital) onHospitalSelect(hospital);
-    // Pre-fill condition from triage description
+
     if (description && !patientCondition) {
       setPatientCondition(description);
     }
+
     setStep(STEPS.PATIENT);
   }
 
-  // ── Create handshake ───────────────────────────────────
   async function handleBookBed(e) {
     e.preventDefault();
     if (!selectedResult || !patientPhone.trim()) return;
@@ -137,7 +174,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         bed_type: Object.keys(selectedResult.beds || {})[0] || 'emergency',
         requesting_party_type: 'individual',
         requesting_party_phone: patientPhone.trim(),
-        patient_summary: `${patientName ? patientName + '. ' : ''}${patientCondition || description || 'Emergency'}`.trim(),
+        patient_summary: `${patientName ? `${patientName}. ` : ''}${patientCondition || description || 'Emergency'}`.trim(),
         hold_duration_min: 45,
       });
 
@@ -151,7 +188,6 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     }
   }
 
-  // ── Reset everything ───────────────────────────────────
   function handleReset() {
     setStep(STEPS.SEARCH);
     setDescription('');
@@ -168,19 +204,21 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   }
 
   function copyCode() {
-    if (transferCode) {
-      navigator.clipboard.writeText(transferCode);
-      setCodeCopied(true);
-      setTimeout(() => setCodeCopied(false), 2000);
-    }
+    if (!transferCode) return;
+    navigator.clipboard.writeText(transferCode);
+    setCodeCopied(true);
+    setTimeout(() => setCodeCopied(false), 2000);
   }
 
-  // ── Collapsed state ────────────────────────────────────
+  const currentStepIndex = stepOrder.indexOf(step);
+
   if (collapsed) {
     return (
       <button
+        type="button"
+        aria-label="Expand search panel"
         onClick={() => setCollapsed(false)}
-        className="absolute top-5 left-5 z-30 bg-[#0d1320]/90 backdrop-blur-sm border border-gray-700/50 text-gray-300 p-2.5 rounded-xl hover:bg-[#151d2e] transition-colors"
+        className="absolute left-5 top-5 z-30 inline-flex h-11 w-11 items-center justify-center rounded-lg border border-slate-700 bg-slate-900/95 text-slate-200 shadow-[0_18px_36px_rgba(2,6,23,0.4)] transition hover:bg-slate-800"
       >
         <ChevronRight size={18} />
       </button>
@@ -188,293 +226,384 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   }
 
   return (
-    <div className="w-[380px] h-full bg-[#0a0f1a] border-r border-gray-800/50 flex flex-col z-20 relative">
+    <aside className="relative z-20 flex h-full w-[400px] flex-col overflow-hidden border-r border-slate-800 bg-slate-950 text-slate-100 shadow-[8px_0_40px_rgba(2,6,23,0.28)]">
+      <div className="border-b border-slate-800 bg-[linear-gradient(180deg,_rgba(8,15,28,0.98)_0%,_rgba(10,19,34,0.98)_100%)] px-5 pb-4 pt-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            {step !== STEPS.SEARCH && (
+              <button
+                type="button"
+                aria-label="Go back"
+                onClick={() => {
+                  if (step === STEPS.RESULTS) {
+                    setStep(STEPS.SEARCH);
+                    onClear();
+                  } else if (step === STEPS.PATIENT) {
+                    setStep(STEPS.RESULTS);
+                  }
+                }}
+                className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 text-slate-300 transition hover:bg-slate-800"
+              >
+                <ArrowLeft size={16} />
+              </button>
+            )}
 
-      {/* ── Header ──────────────────────────────────────── */}
-      <div className="p-5 pb-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          {step !== STEPS.SEARCH && (
-            <button
-              onClick={() => {
-                if (step === STEPS.RESULTS) { setStep(STEPS.SEARCH); onClear(); }
-                else if (step === STEPS.PATIENT) setStep(STEPS.RESULTS);
-                else if (step === STEPS.TRACKING) {} // Can't go back from tracking
-              }}
-              className="text-gray-400 hover:text-white p-1 transition-colors"
-            >
-              <ArrowLeft size={16} />
-            </button>
-          )}
-          <div>
-            <h2 className="text-white text-base font-semibold">
-              {step === STEPS.SEARCH && 'Find a hospital'}
-              {step === STEPS.RESULTS && 'Choose a hospital'}
-              {step === STEPS.PATIENT && 'Patient details'}
-              {step === STEPS.TRACKING && 'Bed reservation'}
-            </h2>
-            <p className="text-gray-500 text-xs mt-0.5">
-              {step === STEPS.SEARCH && 'Describe your emergency or search nearby'}
-              {step === STEPS.RESULTS && `${searchResults?.length || 0} hospitals found`}
-              {step === STEPS.PATIENT && selectedResult?.name}
-              {step === STEPS.TRACKING && (transferCode ? `Code: ${transferCode}` : 'Creating reservation...')}
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-2 rounded-md bg-blue-500/12 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-blue-300">
+                <Search size={12} />
+                Emergency routing
+              </div>
+              <h2 className="mt-3 text-lg font-semibold tracking-tight text-slate-50">
+                {step === STEPS.SEARCH && 'Find the right hospital'}
+                {step === STEPS.RESULTS && 'Choose a destination'}
+                {step === STEPS.PATIENT && 'Add patient details'}
+                {step === STEPS.TRACKING && 'Track the reservation'}
+              </h2>
+              <p className="mt-1 text-sm leading-6 text-slate-400">
+                {step === STEPS.SEARCH && 'Start with triage guidance or a nearby search.'}
+                {step === STEPS.RESULTS && `${searchResults?.length || 0} hospitals ranked for speed and fit.`}
+                {step === STEPS.PATIENT && selectedResult?.name}
+                {step === STEPS.TRACKING && (transferCode ? `Transfer code ${transferCode}` : 'Creating your reservation now.')}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            aria-label="Collapse search panel"
+            onClick={() => setCollapsed(true)}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-900 text-slate-400 transition hover:bg-slate-800 hover:text-slate-100"
+          >
+            <ChevronLeft size={18} />
+          </button>
+        </div>
+
+        <div className="mt-5 grid grid-cols-4 gap-2">
+          {stepLabels.map((label, index) => {
+            const isCompleteOrActive = index <= currentStepIndex;
+            const isCurrent = index === currentStepIndex;
+
+            return (
+              <div key={label} className="space-y-2">
+                <div
+                  className={`h-1.5 rounded-md transition ${
+                    isCompleteOrActive ? 'bg-blue-500' : 'bg-slate-800'
+                  }`}
+                />
+                <p
+                  className={`text-[11px] font-medium ${
+                    isCurrent ? 'text-slate-100' : isCompleteOrActive ? 'text-blue-300' : 'text-slate-500'
+                  }`}
+                >
+                  {label}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {error && (
+        <div className="mx-5 mt-4 flex items-start gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <span className="leading-6">{error}</span>
+          <button
+            type="button"
+            aria-label="Dismiss error"
+            onClick={() => setError(null)}
+            className="ml-auto text-red-300 transition hover:text-red-100"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      {step === STEPS.SEARCH && (
+        <div className="flex-1 overflow-y-auto px-5 py-5">
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 shadow-[0_20px_50px_rgba(2,6,23,0.28)]">
+            <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-950 p-1.5">
+              <button
+                type="button"
+                onClick={() => setMode('triage')}
+                className={`inline-flex items-center justify-center gap-2 rounded-md px-3 py-3 text-sm font-medium transition ${
+                  mode === 'triage'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                <Brain size={16} />
+                Smart Triage
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('quick')}
+                className={`inline-flex items-center justify-center gap-2 rounded-md px-3 py-3 text-sm font-medium transition ${
+                  mode === 'quick'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                <MapPin size={16} />
+                Nearby
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-4">
+              {mode === 'triage' ? (
+                <form onSubmit={handleTriageSearch} className="space-y-4">
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-slate-200">
+                      Describe the emergency
+                    </label>
+                    <textarea
+                      value={description}
+                      onChange={e => setDescription(e.target.value)}
+                      placeholder={"e.g. Adult male, diabetic, collapsed and bleeding from the head"}
+                      rows={5}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-sm leading-6 text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
+                    />
+                    <p className="mt-2 text-xs leading-5 text-slate-500">
+                      Include age, symptoms, injuries, or any equipment you think may be needed.
+                    </p>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={loading || !description.trim()}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-700"
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        Analyzing urgency...
+                      </>
+                    ) : (
+                      <>
+                        <Brain size={16} />
+                        Find best hospital
+                      </>
+                    )}
+                  </button>
+                </form>
+              ) : (
+                <div className="space-y-4">
+                  <div className="rounded-lg bg-slate-950 p-4">
+                    <p className="text-sm font-medium text-slate-200">Use your location to shortlist nearby hospitals.</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      Best for urgent transport when you already know what care is needed.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleQuickSearch}
+                    disabled={loading}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-700"
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        Searching nearby...
+                      </>
+                    ) : (
+                      <>
+                        <MapPin size={16} />
+                        Find hospitals near me
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-300">
+              Routing note
+            </p>
+            <p className="mt-2 text-sm leading-6 text-slate-400">
+              Results favor live availability, distance, and hospital capability so the closest option is not always the first one.
             </p>
           </div>
         </div>
-        <button
-          onClick={() => setCollapsed(true)}
-          className="text-gray-500 hover:text-gray-300 p-1 transition-colors"
-        >
-          <ChevronLeft size={18} />
-        </button>
-      </div>
-
-      {/* ── Step indicator ──────────────────────────────── */}
-      <div className="px-5 pb-4">
-        <div className="flex gap-1">
-          {['Search', 'Select', 'Details', 'Track'].map((label, i) => {
-            const stepOrder = [STEPS.SEARCH, STEPS.RESULTS, STEPS.PATIENT, STEPS.TRACKING];
-            const currentIdx = stepOrder.indexOf(step);
-            const isActive = i <= currentIdx;
-            return (
-              <div key={label} className="flex-1">
-                <div className={`h-1 rounded-full transition-all duration-500 ${
-                  isActive ? 'bg-cyan-500' : 'bg-gray-800'
-                }`} />
-                <p className={`text-[9px] mt-1 ${
-                  isActive ? 'text-cyan-400' : 'text-gray-700'
-                }`}>{label}</p>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ── Error ───────────────────────────────────────── */}
-      {error && (
-        <div className="mx-5 mb-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs px-3 py-2 rounded-lg flex items-center gap-2">
-          <AlertTriangle size={12} />
-          {error}
-          <button onClick={() => setError(null)} className="ml-auto"><X size={12} /></button>
-        </div>
       )}
 
-      {/* ── STEP 1: Search ──────────────────────────────── */}
-      {step === STEPS.SEARCH && (
-        <div className="px-5 flex-1">
-          {/* Mode toggle */}
-          <div className="flex gap-1 bg-[#151d2e] rounded-lg p-1 mb-4">
-            <button
-              onClick={() => setMode('triage')}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-all ${
-                mode === 'triage'
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                  : 'text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              <Brain size={13} />
-              Smart Triage
-            </button>
-            <button
-              onClick={() => setMode('quick')}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-all ${
-                mode === 'quick'
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                  : 'text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              <MapPin size={13} />
-              Nearby
-            </button>
-          </div>
-
-          {mode === 'triage' ? (
-            <form onSubmit={handleTriageSearch}>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder={"Describe the emergency...\ne.g. 'My father collapsed, he's diabetic, bleeding from his head'"}
-                rows={3}
-                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-all"
-              />
-              <button
-                type="submit"
-                disabled={loading || !description.trim()}
-                className="w-full mt-2 bg-cyan-500 hover:bg-cyan-400 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium py-2.5 rounded-lg transition-all flex items-center justify-center gap-2"
-              >
-                {loading ? (
-                  <><Loader2 size={14} className="animate-spin" /> Analyzing...</>
-                ) : (
-                  <><Brain size={14} /> Find best hospital</>
-                )}
-              </button>
-            </form>
-          ) : (
-            <button
-              onClick={handleQuickSearch}
-              disabled={loading}
-              className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                <><Loader2 size={14} className="animate-spin" /> Searching...</>
-              ) : (
-                <><MapPin size={14} /> Find hospitals near me</>
-              )}
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* ── STEP 2: Results ─────────────────────────────── */}
       {step === STEPS.RESULTS && (
-        <div className="flex-1 overflow-y-auto px-5">
-          {/* Triage analysis card */}
-          {triageAnalysis && (
-            <div className="mb-3 bg-cyan-500/5 border border-cyan-500/20 rounded-lg p-3">
-              <p className="text-cyan-300 text-xs font-medium mb-1.5 flex items-center gap-1.5">
-                <Brain size={12} /> AI Analysis
-              </p>
-              <p className="text-white text-sm font-medium">
-                {triageAnalysis.condition_category?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-              </p>
-              <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
-                  triageAnalysis.urgency === 'critical' ? 'bg-red-500/20 text-red-400' :
-                  triageAnalysis.urgency === 'high' ? 'bg-amber-500/20 text-amber-400' :
-                  'bg-green-500/20 text-green-400'
-                }`}>
-                  {triageAnalysis.urgency}
-                </span>
-                {triageAnalysis.required_equipment?.slice(0, 3).map((eq) => (
-                  <span key={eq} className="text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
-                    {eq.replace(/_/g, ' ')}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Result cards */}
-          {searchResults?.map((result, idx) => {
-            const beds = result.beds || {};
-            return (
-              <button
-                key={result.hospital_id}
-                onClick={() => handleSelectHospital(result)}
-                className="w-full text-left mb-2 bg-[#151d2e] hover:bg-[#1a2435] border border-gray-800/50 hover:border-cyan-500/30 rounded-xl p-3.5 transition-all group"
-              >
-                <div className="flex items-start gap-3">
-                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-                    idx === 0 ? 'bg-cyan-500 text-white' : 'bg-gray-700 text-gray-300'
-                  }`}>
-                    {idx + 1}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <h4 className="text-white text-sm font-medium truncate group-hover:text-cyan-300 transition-colors">
-                        {result.name}
-                      </h4>
-                      <span className="text-gray-500 text-xs flex-shrink-0">{result.distance_km}km</span>
-                    </div>
-                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5">
-                      {Object.entries(beds).map(([type, data]) => (
-                        <span key={type} className="text-[11px]">
-                          <span className="text-gray-500">{type.toUpperCase()}: </span>
-                          <span className={data.available > 0 ? 'text-emerald-400' : data.overflow > 0 ? 'text-amber-400' : 'text-red-400'}>
-                            {data.available > 0 ? data.available : data.overflow > 0 ? `${data.overflow} ovf` : '0'}
-                          </span>
-                        </span>
-                      ))}
-                    </div>
-                    <div className="flex items-center gap-2 mt-1.5">
-                      {result.trust_tier === 'verified' && <span className="text-[10px] text-emerald-400">✓ Verified</span>}
-                      {result.trust_tier === 'unverified' && <span className="text-[10px] text-amber-400">⚠ Unverified</span>}
-                      {result.freshness_hours != null && (
-                        <span className="text-[10px] text-gray-600">
-                          {result.freshness_hours < 1 ? `${Math.round(result.freshness_hours * 60)}min ago` : `${Math.round(result.freshness_hours)}h ago`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
+        <div className="flex-1 overflow-y-auto px-5 py-5">
+          <div className="space-y-4">
+            {triageAnalysis && (
+              <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-4 shadow-[0_18px_36px_rgba(2,6,23,0.24)]">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.24em] text-blue-300">
+                  <Brain size={14} />
+                  AI triage summary
                 </div>
-              </button>
-            );
-          })}
+                <h3 className="mt-3 text-base font-semibold text-slate-100">
+                  {formatConditionCategory(triageAnalysis.condition_category)}
+                </h3>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-semibold uppercase ${
+                      triageAnalysis.urgency === 'critical'
+                        ? 'bg-red-500/15 text-red-300'
+                        : triageAnalysis.urgency === 'high'
+                          ? 'bg-amber-500/15 text-amber-300'
+                          : 'bg-emerald-500/15 text-emerald-300'
+                    }`}
+                  >
+                    {triageAnalysis.urgency} urgency
+                  </span>
+                  {triageAnalysis.required_equipment?.slice(0, 3).map(eq => (
+                    <span key={eq} className="rounded-md bg-slate-900 px-2.5 py-1 text-[11px] text-slate-300">
+                      {eq.replace(/_/g, ' ')}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
-          {searchResults?.length === 0 && (
-            <div className="text-center py-8">
-              <p className="text-gray-500 text-sm">No hospitals found nearby</p>
-              <p className="text-gray-600 text-xs mt-1">Try expanding your search area</p>
-            </div>
-          )}
+            {searchResults?.map((result, idx) => {
+              const beds = result.beds || {};
+              const freshness = formatFreshness(result.freshness_hours);
+
+              return (
+                <button
+                  key={result.hospital_id}
+                  type="button"
+                  onClick={() => handleSelectHospital(result)}
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900 p-4 text-left shadow-[0_18px_36px_rgba(2,6,23,0.2)] transition hover:border-blue-500/40 hover:bg-slate-900/90"
+                >
+                  <div className="flex items-start gap-4">
+                    <div className={`mt-0.5 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-sm font-semibold ${
+                      idx === 0 ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-200'
+                    }`}>
+                      {idx + 1}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <h4 className="truncate text-base font-semibold text-slate-100">{result.name}</h4>
+                          <p className="mt-1 text-sm text-slate-400">
+                            {getBestBedSummary(beds)}
+                          </p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <p className="text-sm font-semibold text-slate-100">{result.distance_km} km</p>
+                          <p className="text-xs text-slate-500">away</p>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {Object.entries(beds).map(([type, data]) => (
+                          <span key={type} className="rounded-md bg-slate-950 px-2.5 py-1 text-[11px] text-slate-400">
+                            <span className="font-semibold text-slate-200">{type.toUpperCase()}</span>{' '}
+                            <span className={
+                              data.available > 0
+                                ? 'text-emerald-300'
+                                : data.overflow > 0
+                                  ? 'text-amber-300'
+                                  : 'text-red-300'
+                            }>
+                              {data.available > 0 ? data.available : data.overflow > 0 ? `${data.overflow} ovf` : 'full'}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+
+                      <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
+                        {result.trust_tier === 'verified' && (
+                          <span className="rounded-md bg-emerald-500/15 px-2.5 py-1 font-medium text-emerald-300">
+                            Verified listing
+                          </span>
+                        )}
+                        {result.trust_tier === 'unverified' && (
+                          <span className="rounded-md bg-amber-500/15 px-2.5 py-1 font-medium text-amber-300">
+                            Unverified listing
+                          </span>
+                        )}
+                        {freshness && <span className="text-slate-500">Updated {freshness}</span>}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+
+            {searchResults?.length === 0 && (
+              <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/60 px-6 py-10 text-center">
+                <Search size={24} className="mx-auto text-slate-500" />
+                <p className="mt-4 text-sm font-medium text-slate-200">No hospitals found in this search.</p>
+                <p className="mt-1 text-sm text-slate-500">Try nearby mode or broaden the emergency description.</p>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* ── STEP 3: Patient Details ─────────────────────── */}
       {step === STEPS.PATIENT && (
-        <div className="px-5 flex-1">
-          {/* Selected hospital summary */}
+        <div className="flex-1 overflow-y-auto px-5 py-5">
           {selectedResult && (
-            <div className="bg-[#151d2e] rounded-lg p-3 mb-4 border border-gray-800/50">
-              <div className="flex items-center justify-between">
-                <h4 className="text-white text-sm font-medium">{selectedResult.name}</h4>
-                <span className="text-gray-500 text-xs">{selectedResult.distance_km}km</span>
+            <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 shadow-[0_18px_36px_rgba(2,6,23,0.22)]">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-300">
+                    Selected hospital
+                  </p>
+                  <h3 className="mt-2 truncate text-base font-semibold text-slate-100">{selectedResult.name}</h3>
+                  <p className="mt-1 text-sm leading-6 text-slate-400">{selectedResult.address}</p>
+                </div>
+                <span className="rounded-md bg-slate-950 px-3 py-1 text-xs font-medium text-slate-300">
+                  {selectedResult.distance_km} km
+                </span>
               </div>
-              <p className="text-gray-500 text-xs mt-1">{selectedResult.address}</p>
             </div>
           )}
 
-          <form onSubmit={handleBookBed} className="space-y-3">
-            {/* Name */}
-            <div>
-              <label className="text-gray-400 text-xs mb-1 block flex items-center gap-1.5">
-                <User size={11} /> Patient name
-              </label>
+          <form onSubmit={handleBookBed} className="mt-4 space-y-4">
+            <Field label="Patient name" icon={User}>
               <input
                 type="text"
                 value={patientName}
-                onChange={(e) => setPatientName(e.target.value)}
+                onChange={e => setPatientName(e.target.value)}
                 placeholder="e.g. John Doe"
-                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-cyan-500/50 transition-all"
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
               />
-            </div>
+            </Field>
 
-            {/* Phone */}
-            <div>
-              <label className="text-gray-400 text-xs mb-1 block flex items-center gap-1.5">
-                <Phone size={11} /> Phone number <span className="text-red-400">*</span>
-              </label>
+            <Field label="Phone number" icon={Phone} required>
               <input
                 type="tel"
                 value={patientPhone}
-                onChange={(e) => setPatientPhone(e.target.value)}
+                onChange={e => setPatientPhone(e.target.value)}
                 placeholder="+234..."
                 required
-                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-cyan-500/50 transition-all"
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
               />
-              <p className="text-gray-600 text-[10px] mt-1">Hospital will receive notification via WhatsApp</p>
-            </div>
+              <p className="mt-2 text-xs leading-5 text-slate-500">
+                The hospital receives this number for WhatsApp coordination and arrival follow-up.
+              </p>
+            </Field>
 
-            {/* Condition */}
-            <div>
-              <label className="text-gray-400 text-xs mb-1 block flex items-center gap-1.5">
-                <FileText size={11} /> Brief condition
-              </label>
+            <Field label="Brief condition" icon={FileText}>
               <textarea
                 value={patientCondition}
-                onChange={(e) => setPatientCondition(e.target.value)}
-                placeholder="e.g. Male, 68, fell from height, head injury"
-                rows={2}
-                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-all"
+                onChange={e => setPatientCondition(e.target.value)}
+                placeholder="e.g. Male, 68, fell from height, suspected head injury"
+                rows={4}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-sm leading-6 text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10"
               />
-            </div>
+            </Field>
 
             <button
               type="submit"
               disabled={loading || !patientPhone.trim()}
-              className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2 mt-2"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-700"
             >
               {loading ? (
-                <><Loader2 size={14} className="animate-spin" /> Reserving bed...</>
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Reserving bed...
+                </>
               ) : (
                 'Reserve bed'
               )}
@@ -483,84 +612,86 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         </div>
       )}
 
-      {/* ── STEP 4: Live Status Tracker ─────────────────── */}
       {step === STEPS.TRACKING && (
-        <div className="px-5 flex-1">
-          {/* Transfer code card */}
+        <div className="flex-1 overflow-y-auto px-5 py-5">
           {transferCode && (
-            <div className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-4 mb-4 text-center">
-              <p className="text-gray-400 text-xs mb-2">Transfer Code</p>
-              <div className="flex items-center justify-center gap-2">
-                <span className="text-white text-3xl font-mono font-bold tracking-widest">
-                  {transferCode}
-                </span>
+            <div className="rounded-lg border border-slate-800 bg-slate-900 p-5 text-center shadow-[0_20px_40px_rgba(2,6,23,0.24)]">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-300">Transfer code</p>
+              <div className="mt-3 flex items-center justify-center gap-2">
+                <span className="text-4xl font-bold tracking-[0.24em] text-slate-100">{transferCode}</span>
                 <button
+                  type="button"
+                  aria-label="Copy transfer code"
                   onClick={copyCode}
-                  className="text-gray-500 hover:text-cyan-400 p-1.5 transition-colors"
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-950 text-slate-400 transition hover:text-slate-100"
                 >
-                  {codeCopied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
+                  {codeCopied ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
                 </button>
               </div>
-              <p className="text-gray-600 text-[10px] mt-2">Show this code when you arrive at the hospital</p>
+              <p className="mt-2 text-sm text-slate-400">Show this code when you arrive at the hospital.</p>
             </div>
           )}
 
-          {/* Status display */}
-          <div className="space-y-3">
-            {/* Completed — full arrival confirmation (replaces the step list) */}
+          {selectedResult && (
+            <div className="mt-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
+              <h4 className="text-base font-semibold text-slate-100">{selectedResult.name}</h4>
+              {selectedResult.address && (
+                <p className="mt-1 text-sm leading-6 text-slate-400">{selectedResult.address}</p>
+              )}
+              {selectedResult.phone && (
+                <a
+                  href={`tel:${selectedResult.phone}`}
+                  className="mt-4 flex items-center gap-3 rounded-lg border border-blue-500/20 bg-blue-500/10 px-4 py-3 transition hover:bg-blue-500/15"
+                >
+                  <div className="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-slate-950 text-blue-300">
+                    <Phone size={16} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-slate-100">{selectedResult.phone}</p>
+                    <p className="text-xs text-slate-400">Tap to call the hospital</p>
+                  </div>
+                </a>
+              )}
+            </div>
+          )}
+
+          <div className="mt-4 space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
             {handshake?.status === 'completed' ? (
-              <div className="text-center py-4">
-                {/* Success animation circle */}
-                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-500/10 border-2 border-emerald-500/30 flex items-center justify-center">
-                  <CheckCircle2 size={32} className="text-emerald-400" />
+              <div className="py-4 text-center">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-lg bg-emerald-500/15">
+                  <CheckCircle2 size={30} className="text-emerald-600" />
                 </div>
-
-                <h3 className="text-white text-lg font-semibold mb-1">Arrival Confirmed</h3>
-                <p className="text-gray-400 text-sm mb-4">
-                  You have been checked in at<br />
-                  <span className="text-white font-medium">{selectedResult?.name || 'the hospital'}</span>
+                <h3 className="mt-4 text-lg font-semibold text-slate-100">Arrival confirmed</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-400">
+                  The transfer code has been verified at{' '}
+                  <span className="font-medium text-slate-200">{selectedResult?.name || 'the hospital'}</span>.
                 </p>
-
-                {/* Transfer code (dimmed, for reference) */}
-                <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg px-4 py-3 mb-4 inline-block">
-                  <p className="text-emerald-400/60 text-[10px] uppercase tracking-wider mb-1">Transfer Code</p>
-                  <p className="text-emerald-300 text-xl font-mono font-bold tracking-widest">{transferCode}</p>
-                </div>
-
-                <p className="text-gray-500 text-xs mb-6">
-                  The hospital has verified your code.<br />
-                  Wishing a speedy recovery.
-                </p>
-
                 <button
+                  type="button"
                   onClick={handleReset}
-                  className="text-gray-500 hover:text-gray-300 text-xs transition-colors"
+                  className="mt-5 text-sm font-medium text-slate-400 transition hover:text-slate-100"
                 >
                   Close
                 </button>
               </div>
             ) : (
-              /* Normal step-by-step tracker */
               <>
-                <StatusStep
-                  label="Reservation created"
-                  status="done"
-                  detail={selectedResult?.name}
-                />
-                <StatusStep
-                  label="Hospital notified via WhatsApp"
-                  status="done"
-                />
+                <StatusStep label="Reservation created" status="done" detail={selectedResult?.name} />
+                <StatusStep label="Hospital notified via WhatsApp" status="done" />
                 <StatusStep
                   label="Waiting for hospital response"
                   status={
-                    !handshake || handshake.status === 'requested' ? 'active' :
-                    handshake.status === 'accepted' ? 'done' :
-                    handshake.status === 'declined' ? 'failed' : 'done'
+                    !handshake || handshake.status === 'requested'
+                      ? 'active'
+                      : handshake.status === 'accepted'
+                        ? 'done'
+                        : handshake.status === 'declined'
+                          ? 'failed'
+                          : 'done'
                   }
                   detail={
                     !handshake || handshake.status === 'requested'
-                      ? 'This usually takes 1-3 minutes...'
+                      ? 'Most hospitals respond within a few minutes.'
                       : undefined
                   }
                 />
@@ -568,7 +699,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                 {handshake?.status === 'accepted' && (
                   <>
                     <StatusStep
-                      label="Bed confirmed!"
+                      label="Bed confirmed"
                       status="done"
                       detail={`Held for ${countdown ? Math.ceil(countdown / 60) : 45} minutes`}
                       highlight
@@ -576,7 +707,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                     <StatusStep
                       label="Awaiting your arrival"
                       status="active"
-                      detail="Show your transfer code to the nurse on arrival"
+                      detail="Present the transfer code to the nurse on arrival."
                     />
                   </>
                 )}
@@ -593,39 +724,38 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   <StatusStep
                     label="Reservation expired"
                     status="failed"
-                    detail="The hold time ran out"
+                    detail="The hold time ran out before arrival."
                   />
                 )}
               </>
             )}
           </div>
 
-          {/* Actions based on status */}
           {handshake?.status === 'accepted' && selectedResult && (
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 grid grid-cols-2 gap-3">
               <a
-                href={`https://maps.google.com/maps?daddr=${selectedResult.address || selectedResult.name + ' Lagos'}`}
+                href={`https://maps.google.com/maps?daddr=${selectedResult.address || `${selectedResult.name} Lagos`}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2"
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-500"
               >
-                <Navigation size={14} />
+                <Navigation size={15} />
                 Directions
               </a>
               <a
                 href={`https://wa.me/?text=${encodeURIComponent(
-                  `🏥 BedSignal — Bed Reserved\n\n` +
+                  `BedSignal - Bed Reserved\n\n` +
                   `Hospital: ${selectedResult.name}\n` +
                   `Transfer Code: ${transferCode}\n` +
                   `Address: ${selectedResult.address || ''}\n\n` +
-                  `Directions: https://maps.google.com/maps?daddr=${encodeURIComponent(selectedResult.address || selectedResult.name + ' Lagos')}\n\n` +
+                  `Directions: https://maps.google.com/maps?daddr=${encodeURIComponent(selectedResult.address || `${selectedResult.name} Lagos`)}\n\n` +
                   `Show the transfer code on arrival.`
                 )}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex-1 bg-[#25D366] hover:bg-[#20bd5a] text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2"
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-800 px-4 py-3 text-sm font-semibold text-slate-100 transition hover:bg-slate-700"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" /></svg>
                 Share
               </a>
             </div>
@@ -633,73 +763,83 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
           {(handshake?.status === 'declined' || handshake?.status === 'expired') && (
             <button
+              type="button"
               onClick={handleReset}
-              className="w-full mt-4 bg-cyan-500 hover:bg-cyan-400 text-white text-sm font-medium py-3 rounded-lg transition-all"
+              className="mt-4 inline-flex w-full items-center justify-center rounded-lg bg-blue-600 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-500"
             >
               Search again
             </button>
           )}
 
-          {/* Countdown timer for accepted */}
           {handshake?.status === 'accepted' && countdown > 0 && (
-            <div className="mt-4 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-center">
-              <p className="text-amber-400 text-xs">Bed held for</p>
-              <p className="text-amber-300 text-xl font-mono font-bold mt-1">
+            <div className="mt-4 rounded-lg border border-blue-500/20 bg-blue-500/10 p-4 text-center">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-300">Bed held for</p>
+              <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-100">
                 {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
               </p>
-              <p className="text-amber-400/60 text-[10px] mt-1">Please arrive before the hold expires</p>
+              <p className="mt-1 text-xs text-slate-400">Please arrive before the hold expires.</p>
             </div>
           )}
         </div>
       )}
 
-      {/* ── Footer ──────────────────────────────────────── */}
-      <div className="p-4 border-t border-gray-800/50">
+      <div className="border-t border-slate-800 bg-slate-950/90 px-5 py-4">
         {step === STEPS.TRACKING ? (
           <button
+            type="button"
             onClick={handleReset}
-            className="w-full text-gray-500 hover:text-gray-300 text-xs text-center transition-colors"
+            className="w-full text-sm font-medium text-slate-400 transition hover:text-slate-100"
           >
             Start a new search
           </button>
         ) : (
-          <p className="text-gray-600 text-[10px] text-center">
-            In an emergency? Text <span className="text-cyan-400 font-medium">EMERGENCY</span> to our WhatsApp
+          <p className="text-center text-xs leading-5 text-slate-500">
+            In an emergency? Text <span className="font-semibold text-blue-300">EMERGENCY</span> to our WhatsApp.
           </p>
         )}
       </div>
-    </div>
+    </aside>
   );
 }
 
+function Field({ label, icon: Icon, required, children }) {
+  return (
+    <label className="block rounded-lg border border-slate-800 bg-slate-900 p-4">
+      <span className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-200">
+        <Icon size={15} className="text-blue-300" />
+        {label}
+        {required && <span className="text-blue-300">*</span>}
+      </span>
+      {children}
+    </label>
+  );
+}
 
-/**
- * StatusStep — single step in the status tracker.
- */
 function StatusStep({ label, status, detail, highlight }) {
   const icons = {
-    done: <CheckCircle2 size={16} className="text-emerald-400" />,
-    active: <Loader2 size={16} className="text-cyan-400 animate-spin" />,
-    failed: <XCircle size={16} className="text-red-400" />,
-    pending: <Clock size={16} className="text-gray-600" />,
+    done: <CheckCircle2 size={18} className="text-emerald-600" />,
+    active: <Loader2 size={18} className="animate-spin text-blue-400" />,
+    failed: <XCircle size={18} className="text-red-600" />,
+    pending: <Clock size={18} className="text-slate-600" />,
   };
 
   return (
-    <div className={`flex items-start gap-3 ${highlight ? 'bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-3 -mx-1' : ''}`}>
-      <div className="mt-0.5 flex-shrink-0">
+    <div className={`flex items-start gap-3 rounded-lg ${highlight ? 'border border-emerald-500/20 bg-emerald-500/10 p-4' : 'p-1'}`}>
+      <div className="mt-0.5 shrink-0">
         {icons[status] || icons.pending}
       </div>
-      <div>
-        <p className={`text-sm ${
-          status === 'done' ? 'text-white' :
-          status === 'active' ? 'text-cyan-300' :
-          status === 'failed' ? 'text-red-400' :
-          'text-gray-500'
+      <div className="min-w-0">
+        <p className={`text-sm font-medium ${
+          status === 'failed'
+            ? 'text-red-300'
+            : status === 'active'
+              ? 'text-slate-100'
+              : 'text-slate-200'
         }`}>
           {label}
         </p>
         {detail && (
-          <p className="text-gray-500 text-xs mt-0.5">{detail}</p>
+          <p className="mt-1 text-xs leading-5 text-slate-500">{detail}</p>
         )}
       </div>
     </div>
