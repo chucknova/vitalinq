@@ -52,6 +52,7 @@ async def create_handshake_endpoint(request: HandshakeCreateRequest):
         requesting_party_type=request.requesting_party_type,
         requesting_party_phone=request.requesting_party_phone,
         patient_summary=request.patient_summary,
+        parsed_requirements=request.parsed_requirements,
         query_id=request.query_id,
         hold_duration_min=request.hold_duration_min,
     )
@@ -61,8 +62,11 @@ async def create_handshake_endpoint(request: HandshakeCreateRequest):
     hospital_phone = h.get("whatsapp_number")
     if hospital_phone:
         bed_label = request.bed_type.upper()
+        urgency = (request.parsed_requirements or {}).get("urgency", "unknown").upper()
+        urgency_emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(urgency, "⚪")
         await send_buttons(hospital_phone, (
             f"🚨 *Incoming Patient — Bed Hold Request*\n\n"
+            f"Urgency: {urgency_emoji} *{urgency}*\n"
             f"Bed needed: *{bed_label}*\n"
             f"Patient: {request.patient_summary or 'No details provided'}\n"
             f"Transfer code: *{handshake['transfer_code']}*\n\n"
@@ -107,6 +111,7 @@ async def get_handshake_status(handshake_id: str):
         patient_summary=handshake.get("patient_summary"),
         expires_at=handshake.get("expires_at"),
         time_remaining_sec=handshake.get("_time_remaining_sec"),
+        declined_reason=handshake.get("declined_reason"),
     )
 
 

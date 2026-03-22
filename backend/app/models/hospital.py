@@ -51,6 +51,7 @@ class HospitalSearchResult(BaseModel):
     name: str
     distance_km: float
     address: str
+    phone: Optional[str] = None
     trust_tier: str
     beds: dict[str, BedStatus]       # keyed by bed_type
     equipment: list[str]
@@ -85,6 +86,7 @@ class ParsedRequirements(BaseModel):
     required_equipment: list[str]
     required_specialists: list[str]
     condition_category: str
+    self_care_advice: list[str] = []
 
 
 class TriageSearchResponse(BaseModel):

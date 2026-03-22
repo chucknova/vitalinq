@@ -21,6 +21,7 @@ class HandshakeCreateRequest(BaseModel):
     requesting_party_type: str = Field(description="ambulance, hospital, or individual")
     requesting_party_phone: str
     patient_summary: Optional[str] = None
+    parsed_requirements: Optional[dict] = None
     query_id: Optional[str] = None
     hold_duration_min: int = Field(default=45, ge=15, le=120)
 
@@ -54,6 +55,7 @@ class HandshakeStatusResponse(BaseModel):
     patient_summary: Optional[str]
     expires_at: Optional[datetime]
     time_remaining_sec: Optional[int]
+    declined_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

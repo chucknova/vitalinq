@@ -49,7 +49,8 @@ as a JSON object. Return ONLY valid JSON, no other text.
     "required_beds": ["icu", "ward", "maternity", "pediatric", "emergency", "surgical"],
     "required_equipment": ["ct_scanner", "mri", "blood_bank", "ventilators", "dialysis", "oxygen", "xray", "ultrasound", "theatre", "lab"],
     "required_specialists": ["neurosurgeon", "cardiologist", "endocrinologist", "pediatrician", "obstetrician", "orthopedic_surgeon", "general_surgeon", "intensivist", "anesthesiologist"],
-    "condition_category": "string describing the likely condition"
+    "condition_category": "string describing the likely condition",
+    "self_care_advice": ["string", "string"]
 }
 
 Rules:
@@ -64,6 +65,8 @@ Rules:
 - For burns, include surgical bed and theatre
 - For fractures / orthopedic injuries, include xray and orthopedic_surgeon
 - If the description is too vague, return urgency="medium" and required_beds=["emergency"] with minimal equipment
+- If urgency is "low", include 2-3 brief, practical self-care suggestions in self_care_advice. Keep advice safe and conservative. Always end with "If symptoms worsen, seek medical attention immediately."
+- If urgency is "medium", "high", or "critical", set self_care_advice to an empty array []
 - Return ONLY the JSON object, no markdown, no explanation, no backticks"""
 
 
@@ -77,6 +80,7 @@ SAFE_DEFAULT = {
     "required_equipment": ["oxygen", "xray"],
     "required_specialists": [],
     "condition_category": "unspecified_emergency",
+    "self_care_advice": [],
 }
 
 
@@ -92,6 +96,7 @@ CACHED_TRIAGE = {
         "required_equipment": ["ct_scanner", "blood_bank", "ventilators", "oxygen"],
         "required_specialists": ["neurosurgeon", "intensivist"],
         "condition_category": "traumatic_brain_injury",
+        "self_care_advice": [],
     },
     "cardiac": {
         "urgency": "critical",
@@ -99,6 +104,7 @@ CACHED_TRIAGE = {
         "required_equipment": ["ventilators", "oxygen", "lab"],
         "required_specialists": ["cardiologist", "intensivist"],
         "condition_category": "cardiac_emergency",
+        "self_care_advice": [],
     },
     "pregnancy": {
         "urgency": "high",
@@ -106,6 +112,7 @@ CACHED_TRIAGE = {
         "required_equipment": ["ultrasound", "theatre", "blood_bank", "oxygen"],
         "required_specialists": ["obstetrician", "anesthesiologist"],
         "condition_category": "pregnancy_complication",
+        "self_care_advice": [],
     },
     "diabetic": {
         "urgency": "high",
@@ -113,6 +120,7 @@ CACHED_TRIAGE = {
         "required_equipment": ["lab", "oxygen"],
         "required_specialists": ["endocrinologist", "intensivist"],
         "condition_category": "diabetic_emergency",
+        "self_care_advice": [],
     },
     "child_fever": {
         "urgency": "medium",
@@ -120,6 +128,43 @@ CACHED_TRIAGE = {
         "required_equipment": ["lab", "oxygen", "xray"],
         "required_specialists": ["pediatrician"],
         "condition_category": "pediatric_febrile_illness",
+        "self_care_advice": [],
+    },
+    "headache": {
+        "urgency": "low",
+        "required_beds": [],
+        "required_equipment": [],
+        "required_specialists": [],
+        "condition_category": "mild_headache",
+        "self_care_advice": [
+            "Rest in a quiet, dark room and stay hydrated.",
+            "Take over-the-counter pain relief such as paracetamol (follow dosage instructions).",
+            "If symptoms worsen, seek medical attention immediately.",
+        ],
+    },
+    "cold_flu": {
+        "urgency": "low",
+        "required_beds": [],
+        "required_equipment": [],
+        "required_specialists": [],
+        "condition_category": "common_cold_or_flu",
+        "self_care_advice": [
+            "Rest, drink plenty of fluids, and eat light meals.",
+            "Take paracetamol for fever or body aches. Use warm salt water to gargle for a sore throat.",
+            "If symptoms worsen, seek medical attention immediately.",
+        ],
+    },
+    "stomach_ache": {
+        "urgency": "low",
+        "required_beds": [],
+        "required_equipment": [],
+        "required_specialists": [],
+        "condition_category": "mild_stomach_discomfort",
+        "self_care_advice": [
+            "Avoid heavy or spicy food. Drink water or oral rehydration solution (ORS).",
+            "Rest and monitor symptoms. A pharmacy can recommend over-the-counter relief.",
+            "If symptoms worsen, seek medical attention immediately.",
+        ],
     },
 }
 
@@ -135,7 +180,7 @@ def _check_cache(description: str) -> dict | None:
     if any(w in desc_lower for w in ("chest pain", "heart", "cardiac", "heart attack")):
         return CACHED_TRIAGE["cardiac"]
 
-    if any(w in desc_lower for w in ("pregnant", "pregnancy", "labor", "labour", "contractions", "water broke", "water just broke" "bleeding pregnant")):
+    if any(w in desc_lower for w in ("pregnant", "pregnancy", "labor", "labour", "contractions", "water broke", "bleeding pregnant")):
         return CACHED_TRIAGE["pregnancy"]
 
     if any(w in desc_lower for w in ("diabetic", "diabetes", "sugar", "insulin", "collapsed diabetic")):
@@ -144,6 +189,19 @@ def _check_cache(description: str) -> dict | None:
     if any(w in desc_lower for w in ("child", "baby", "kid", "son", "daughter", "toddler")):
         if any(w in desc_lower for w in ("fever", "hot", "temperature", "vomiting", "convulsion")):
             return CACHED_TRIAGE["child_fever"]
+
+    # Low-urgency matches
+    if any(w in desc_lower for w in ("headache", "head ache", "migraine", "mild headache")):
+        if not any(w in desc_lower for w in ("severe", "worst", "blinding", "vomiting", "collapsed")):
+            return CACHED_TRIAGE["headache"]
+
+    if any(w in desc_lower for w in ("cold", "flu", "cough", "sore throat", "runny nose", "sneezing", "blocked nose")):
+        if not any(w in desc_lower for w in ("breathing", "can't breathe", "wheezing", "severe")):
+            return CACHED_TRIAGE["cold_flu"]
+
+    if any(w in desc_lower for w in ("stomach ache", "stomach pain", "belly", "diarrhea", "diarrhoea", "indigestion", "nausea")):
+        if not any(w in desc_lower for w in ("severe", "blood", "vomiting blood", "collapsed", "pregnant")):
+            return CACHED_TRIAGE["stomach_ache"]
 
     return None
 

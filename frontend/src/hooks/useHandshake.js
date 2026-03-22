@@ -39,7 +39,7 @@ export default function useHandshake(handshakeId) {
         }
 
         // Only stop polling on truly terminal states
-        const terminal = ['declined', 'expired', 'completed'];
+        const terminal = ['declined', 'expired', 'completed', 'overridden'];
         if (terminal.includes(res.data.status)) {
           clearInterval(pollRef.current);
           pollRef.current = null;

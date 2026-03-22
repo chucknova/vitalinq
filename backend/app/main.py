@@ -15,7 +15,7 @@ from app.config import settings
 from app.tasks.scheduler import start_scheduler, stop_scheduler
 # from app.routers import search
 # from app.routers import search, hospitals
-from app.routers import search, hospitals, webhooks, handshakes, onboard, log
+from app.routers import search, hospitals, webhooks, handshakes, onboard, log, dashboard
 
 # ---------------------------------------------------------------------------
 # Lifespan — runs on startup and shutdown
@@ -81,4 +81,5 @@ app.include_router(webhooks.router, prefix="/api")
 app.include_router(handshakes.router, prefix="/api")
 app.include_router(onboard.router, prefix="/api")
 app.include_router(log.router, prefix="/api")
+app.include_router(dashboard.router, prefix="/api")
 # ---------------------------------------------------------------------------

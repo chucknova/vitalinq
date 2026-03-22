@@ -106,7 +106,8 @@ async def send_checkin_message(hospital_id: str):
         f"🔔 *BedSignal Check-In for {name}*\n\n"
         f"Your current recorded availability:\n"
         f"{bed_summary}\n\n"
-        f"Last updated: {hours_text}"
+        f"Last updated: {hours_text}\n\n"
+        f"📊 Update via dashboard: bedsignal.vercel.app/hospital/{hospital.get('slug', '')}/dashboard"
     )
 
     buttons = [
@@ -416,7 +417,8 @@ async def handle_update_another_no(phone: str):
         f"Updated: {now_str}\n"
         f"Next check-in in 6 hours.\n\n"
         f"Send *STATUS* anytime to see your current data.\n"
-        f"Send *UPDATE* anytime to start a new update."
+        f"Send *UPDATE* anytime to start a new update.\n"
+        f"Send *DISCHARGE 2 ICU* to record discharges."
     ))
 
     clear_session(phone)

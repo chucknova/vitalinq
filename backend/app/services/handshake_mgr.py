@@ -1,7 +1,7 @@
 """
 Handshake manager — bed reservation state machine.
 
-Lifecycle:  requested → accepted | declined → completed | expired
+Lifecycle:  requested → accepted | declined → completed | expired | overridden
 
 A "handshake" is BedSignal's term for a bed reservation. When a user
 finds a hospital and wants to reserve a bed:
@@ -11,6 +11,7 @@ finds a hospital and wants to reserve a bed:
 3. DECLINE:  hospital taps Decline → requester notified, alternatives offered
 4. COMPLETE: patient arrives, shows transfer code → bed hold finalized
 5. EXPIRE:   timer runs out → bed restored, both parties notified
+6. OVERRIDE: hospital overrides for a walk-in → displaced patient auto-rerouted
 
 Usage:
     from app.services.handshake_mgr import create_handshake, accept_handshake, ...
@@ -317,3 +318,98 @@ async def get_handshake_detail(handshake_id: str) -> dict | None:
         handshake["_time_remaining_sec"] = None
 
     return handshake
+
+
+# ---------------------------------------------------------------------------
+# OVERRIDE handshake — walk-in emergency displaces held patient
+# ---------------------------------------------------------------------------
+
+URGENCY_RANK = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
+
+
+async def override_handshake(
+    handshake_id: str,
+    walkin_urgency: str,
+    reason: str | None = None,
+) -> dict | None:
+    """
+    Hospital overrides an accepted bed hold for a more critical walk-in.
+
+    - Sets status to 'overridden'
+    - Does NOT restore bed count (walk-in takes the bed)
+    - Returns the handshake with urgency comparison info
+
+    The caller (router/dashboard) handles:
+    - Notifying the displaced patient
+    - Running auto-reroute search
+    """
+    # Fetch the handshake — must be accepted
+    result = (
+        supabase.table("handshakes")
+        .select("*")
+        .eq("id", handshake_id)
+        .eq("status", "accepted")
+        .execute()
+    )
+
+    if not result.data:
+        print(f"⚠️ Override failed: handshake {handshake_id} not found or not accepted")
+        return None
+
+    handshake = result.data[0]
+    now = datetime.now(timezone.utc)
+
+    # Determine the held patient's urgency
+    held_urgency = "medium"  # default
+    query_id = handshake.get("query_id")
+    if query_id:
+        query = (
+            supabase.table("queries")
+            .select("parsed_requirements")
+            .eq("id", query_id)
+            .execute()
+        )
+        if query.data and query.data[0].get("parsed_requirements"):
+            parsed = query.data[0]["parsed_requirements"]
+            if isinstance(parsed, dict):
+                held_urgency = parsed.get("urgency", "medium")
+
+    # Compare urgencies
+    walkin_rank = URGENCY_RANK.get(walkin_urgency, 2)
+    held_rank = URGENCY_RANK.get(held_urgency, 2)
+
+    if walkin_rank > held_rank:
+        urgency_comparison = "higher"
+    elif walkin_rank == held_rank:
+        urgency_comparison = "equal"
+    else:
+        urgency_comparison = "lower"
+
+    # Execute the override
+    updated = (
+        supabase.table("handshakes")
+        .update({
+            "status": "overridden",
+            "declined_reason": f"override:{walkin_urgency}:{reason or 'walk-in emergency'}",
+            "completed_at": now.isoformat(),
+        })
+        .eq("id", handshake_id)
+        .execute()
+    )
+
+    # NOTE: We do NOT restore the bed — the walk-in takes it
+
+    print(f"🔴 HANDSHAKE OVERRIDDEN: {handshake_id[:8]}... walk-in={walkin_urgency} held={held_urgency} ({urgency_comparison})")
+
+    result_data = updated.data[0] if updated.data else handshake
+    result_data["_walkin_urgency"] = walkin_urgency
+    result_data["_held_urgency"] = held_urgency
+    result_data["_urgency_comparison"] = urgency_comparison
+    result_data["_query_id"] = query_id
+
+    return result_data
