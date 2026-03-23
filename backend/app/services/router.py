@@ -13,6 +13,9 @@ Priority order (first match wins):
 """
 
 import re
+import base64
+import httpx
+from app.config import settings
 from app.database import supabase
 from app.services.sessions import get_session, set_session, update_session, clear_session
 from app.services.whatsapp import send_text, send_list, send_buttons, resolve_numeric_reply
@@ -39,6 +42,122 @@ from app.services.hospital_flows import (
     handle_discharge,
     send_bed_type_list,
 )
+
+
+# ---------------------------------------------------------------------------
+# Voice note transcription via Claude
+# ---------------------------------------------------------------------------
+
+async def transcribe_voice_note(media_url: str, media_type: str) -> str | None:
+    """
+    Download a voice note from Twilio and transcribe it.
+    
+    Strategy: Download audio → save as temp file → use OpenAI Whisper API.
+    Fallback: If Whisper isn't available, ask Claude to work with a text description.
+    """
+    import tempfile
+    import os
+
+    try:
+        # Download the audio from Twilio
+        async with httpx.AsyncClient() as client:
+            auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+            resp = await client.get(media_url, auth=auth, follow_redirects=True, timeout=15)
+            if resp.status_code != 200:
+                print(f"   ❌ Failed to download voice note: HTTP {resp.status_code}")
+                return None
+            audio_bytes = resp.content
+
+        print(f"   📥 Downloaded {len(audio_bytes)} bytes of audio")
+
+        # Try OpenAI Whisper first (if key is available)
+        openai_key = getattr(settings, 'OPENAI_API_KEY', None) or os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            return await _transcribe_with_whisper(audio_bytes, openai_key)
+
+        # Fallback: try Groq Whisper (if key is available)
+        groq_key = getattr(settings, 'GROQ_API_KEY', None) or os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            return await _transcribe_with_groq(audio_bytes, groq_key)
+
+        # Last fallback: no transcription service available
+        print("   ❌ No transcription service configured (set OPENAI_API_KEY or GROQ_API_KEY)")
+        return None
+
+    except Exception as e:
+        print(f"   ❌ Voice note transcription failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+async def _transcribe_with_whisper(audio_bytes: bytes, api_key: str) -> str | None:
+    """Transcribe using OpenAI Whisper API."""
+    import tempfile, os
+
+    # Write to temp file (Whisper needs a file)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+        f.write(audio_bytes)
+        temp_path = f.name
+
+    try:
+        async with httpx.AsyncClient() as client:
+            with open(temp_path, "rb") as audio_file:
+                resp = await client.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={"file": ("voice.ogg", audio_file, "audio/ogg")},
+                    data={
+                        "model": "whisper-1",
+                        "language": "en",
+                        "prompt": "This is a medical emergency description from Lagos, Nigeria. The speaker may use Nigerian Pidgin English.",
+                    },
+                    timeout=30,
+                )
+
+            if resp.status_code == 200:
+                text = resp.json().get("text", "").strip()
+                print(f"   🎤 Whisper transcribed: '{text[:80]}'")
+                return text if len(text) > 2 else None
+            else:
+                print(f"   ❌ Whisper API error: {resp.status_code} {resp.text[:200]}")
+                return None
+    finally:
+        os.unlink(temp_path)
+
+
+async def _transcribe_with_groq(audio_bytes: bytes, api_key: str) -> str | None:
+    """Transcribe using Groq Whisper API (free, fast)."""
+    import tempfile, os
+
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+        f.write(audio_bytes)
+        temp_path = f.name
+
+    try:
+        async with httpx.AsyncClient() as client:
+            with open(temp_path, "rb") as audio_file:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={"file": ("voice.ogg", audio_file, "audio/ogg")},
+                    data={
+                        "model": "whisper-large-v3",
+                        "language": "en",
+                        "prompt": "Medical emergency description from Lagos Nigeria. Speaker may use Pidgin English.",
+                    },
+                    timeout=30,
+                )
+
+            if resp.status_code == 200:
+                text = resp.json().get("text", "").strip()
+                print(f"   🎤 Groq transcribed: '{text[:80]}'")
+                return text if len(text) > 2 else None
+            else:
+                print(f"   ❌ Groq API error: {resp.status_code} {resp.text[:200]}")
+                return None
+    finally:
+        os.unlink(temp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -84,9 +203,29 @@ async def route_message(
     lat: float | None,
     lng: float | None,
     profile_name: str = "",
+    media_url: str | None = None,
+    media_type: str | None = None,
 ):
     body_stripped = body.strip()
     body_upper = body_stripped.upper()
+
+    # ==================================================================
+    # 0. VOICE NOTE — transcribe and treat as text
+    # ==================================================================
+    if media_url and media_type and media_type.startswith("audio/"):
+        print(f"🎤 VOICE NOTE from {phone} — transcribing...")
+        transcription = await transcribe_voice_note(media_url, media_type)
+        if transcription:
+            print(f"🎤 Transcribed: '{transcription[:80]}'")
+            # Send confirmation to user
+            await send_text(phone, f"🎤 _Voice note received:_ \"{transcription}\"\n\n_Processing your request..._")
+            # Treat as text input — re-route with the transcription
+            body_stripped = transcription.strip()
+            body_upper = body_stripped.upper()
+            body = transcription
+        else:
+            await send_text(phone, "Sorry, I couldn't process that voice note. Please try typing your message instead.")
+            return
 
     # ==================================================================
     # 1. BUTTON PAYLOAD

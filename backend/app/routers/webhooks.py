@@ -86,7 +86,17 @@ async def whatsapp_webhook(
         print(f" [List: {ListReply}]", end="")
     if lat:
         print(f" [Location: {lat},{lng}]", end="")
+    if int(NumMedia) > 0:
+        print(f" [Media: {MediaContentType0}]", end="")
     print()
+
+    # ── Handle voice notes ──────────────────────────────────
+    media_url = None
+    media_type = None
+    if int(NumMedia) > 0 and MediaContentType0 and MediaUrl0:
+        media_type = MediaContentType0
+        media_url = MediaUrl0
+        print(f"🎤 Media detected: {media_type} → {media_url}")
 
     # ── Route the message ─────────────────────────────────────
     try:
@@ -98,6 +108,8 @@ async def whatsapp_webhook(
             lat=lat,
             lng=lng,
             profile_name=ProfileName,
+            media_url=media_url,
+            media_type=media_type,
         )
     except Exception as e:
         # Never let the webhook fail — Twilio retries on errors

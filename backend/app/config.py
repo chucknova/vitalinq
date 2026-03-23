@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # ── Anthropic ─────────────────────────────────────────────
     ANTHROPIC_API_KEY: str
 
+    # ── Voice transcription (optional — either one works) ────
+    GROQ_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
+
     # ── Google Maps (optional — needed for Dispatch ETA) ──────
     GOOGLE_MAPS_API_KEY: str = ""
 
@@ -45,7 +49,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     BASE_URL: str = "http://localhost:8000"
     FRONTEND_URL: str = "http://localhost:5173"
-    DRY_RUN: str = "false"
+    DRY_RUN: str = "false"  # Set to "true" to log WhatsApp messages instead of sending
 
 
 # Single instance — import this everywhere
