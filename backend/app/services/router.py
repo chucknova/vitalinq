@@ -15,6 +15,8 @@ Priority order (first match wins):
 import re
 import base64
 import httpx
+import os
+from datetime import datetime, timezone
 from app.config import settings
 from app.database import supabase
 from app.services.sessions import get_session, set_session, update_session, clear_session
@@ -480,6 +482,154 @@ async def handle_button(phone: str, payload: str):
         clear_session(phone)
         await send_text(phone, "Override cancelled. The bed hold remains active.")
 
+    elif payload.startswith("broadcast_report_"):
+        broadcast_id = payload.replace("broadcast_report_", "")
+        hospital = await get_hospital_by_phone(phone)
+
+        if not hospital:
+            await send_text(phone, "Could not identify your hospital.")
+            return
+
+        # Fetch current bed data for this hospital
+        beds = (
+            supabase.table("hospital_beds")
+            .select("bed_type, available_count")
+            .eq("hospital_id", hospital["id"])
+            .execute()
+        ).data
+
+        if beds:
+            # Show pre-filled data and ask to confirm or update
+            bed_lines = "\n".join(
+                f"  {b['bed_type'].upper()}: {b['available_count'] or 0}"
+                for b in beds if (b['available_count'] or 0) > 0 or b['bed_type'] in ('icu', 'ward', 'emergency')
+            )
+
+            set_session(phone, flow="broadcast_report", step="awaiting_confirm", data={
+                "broadcast_id": broadcast_id,
+                "hospital_id": hospital["id"],
+                "beds": beds,
+            })
+
+            await send_buttons(phone, (
+                f"\U0001f3e5 *{hospital['name']}* — Current availability:\n\n"
+                f"{bed_lines}\n\n"
+                f"Is this still accurate?"
+            ), [
+                ("\u2705 Yes, confirm", f"broadcast_confirm_{broadcast_id}"),
+                ("\u270f\ufe0f Update now", f"broadcast_update_{broadcast_id}"),
+            ])
+        else:
+            # No bed data — ask them to report via the UPDATE flow
+            set_session(phone, flow="broadcast_report", step="awaiting_capacity", data={
+                "broadcast_id": broadcast_id,
+                "hospital_id": hospital["id"],
+            })
+            await send_text(phone, (
+                "We don't have bed data for your hospital yet.\n\n"
+                "Please reply with your available beds:\n"
+                "ICU: X, Ward: X, Emergency: X"
+            ))
+
+    elif payload.startswith("broadcast_confirm_"):
+        # Hospital confirmed current data is accurate
+        broadcast_id = payload.replace("broadcast_confirm_", "")
+        session = get_session(phone)
+        hospital = await get_hospital_by_phone(phone)
+
+        if not hospital:
+            await send_text(phone, "Could not identify your hospital.")
+            return
+
+        beds = []
+        if session and session.get("data"):
+            beds = session["data"].get("beds", [])
+        clear_session(phone)
+
+        # Build capacity from confirmed beds
+        capacity = {
+            "icu_available": 0, "ward_available": 0,
+            "emergency_available": 0, "surgical_available": 0,
+            "maternity_available": 0, "pediatric_available": 0,
+        }
+        for b in beds:
+            col = f"{b['bed_type']}_available"
+            if col in capacity:
+                capacity[col] = b.get("available_count", 0) or 0
+
+        # Store response
+        supabase.table("broadcast_responses").insert({
+            "broadcast_id": broadcast_id,
+            "hospital_id": hospital["id"],
+            "status": "responded",
+            **capacity,
+        }).execute()
+
+        # Increment response count
+        bc = supabase.table("broadcasts").select("hospitals_responded").eq("id", broadcast_id).execute()
+        if bc.data:
+            supabase.table("broadcasts").update({
+                "hospitals_responded": (bc.data[0]["hospitals_responded"] or 0) + 1,
+            }).eq("id", broadcast_id).execute()
+
+        # Refresh timestamps
+        now = datetime.now(timezone.utc).isoformat()
+        supabase.table("hospitals").update({
+            "last_report_at": now,
+            "freshness_score": 1.0,
+        }).eq("id", hospital["id"]).execute()
+
+        summary = ", ".join(
+            f"{b['bed_type'].upper()}: {b['available_count'] or 0}"
+            for b in beds if (b['available_count'] or 0) > 0
+        )
+        await send_text(phone, (
+            f"\u2705 *Confirmed — {hospital['name']}*\n\n"
+            f"{summary}\n\n"
+            f"Stand by for patient assignments."
+        ))
+        print(f"   \U0001f4ca BROADCAST CONFIRMED: {hospital['name']} — {summary}")
+
+    elif payload.startswith("broadcast_update_"):
+        # Hospital wants to update before confirming — drop into UPDATE flow
+        broadcast_id = payload.replace("broadcast_update_", "")
+        session = get_session(phone)
+        hospital = await get_hospital_by_phone(phone)
+
+        if not hospital:
+            await send_text(phone, "Could not identify your hospital.")
+            return
+
+        # Store broadcast_id so we can capture the response after update
+        set_session(phone, flow="broadcast_report", step="awaiting_capacity", data={
+            "broadcast_id": broadcast_id,
+            "hospital_id": hospital["id"],
+        })
+        await send_text(phone, (
+            "Please reply with your *current* available beds:\n\n"
+            "ICU: X, Ward: X, Emergency: X\n\n"
+            "Include only the types you have."
+        ))
+
+    elif payload.startswith("broadcast_decline_"):
+        broadcast_id = payload.replace("broadcast_decline_", "")
+        # Hospital can't help
+        hospital = await get_hospital_by_phone(phone)
+        if hospital:
+            supabase.table("broadcast_responses").insert({
+                "broadcast_id": broadcast_id,
+                "hospital_id": hospital["id"],
+                "status": "declined",
+                "notes": "Unable to help",
+            }).execute()
+            # Increment response count
+            bc = supabase.table("broadcasts").select("hospitals_responded").eq("id", broadcast_id).execute()
+            if bc.data:
+                supabase.table("broadcasts").update({
+                    "hospitals_responded": (bc.data[0]["hospitals_responded"] or 0) + 1,
+                }).eq("id", broadcast_id).execute()
+        await send_text(phone, "Understood. Thank you for responding. Stay safe.")
+
     else:
         print(f"   → Unknown button: {payload}")
 
@@ -664,8 +814,98 @@ async def handle_session_input(
             # Hospital typed instead of tapping confirm/cancel
             await send_text(phone, "Please reply with a number to confirm or cancel the override.")
 
+    elif flow == "broadcast_report":
+        if step == "awaiting_capacity":
+            # Hospital sent their bed counts — parse it
+            broadcast_id = session["data"].get("broadcast_id")
+            hospital = await get_hospital_by_phone(phone)
+            clear_session(phone)
+
+            if not hospital:
+                await send_text(phone, "Could not identify your hospital. Please try again.")
+                return
+
+            # Parse bed counts using the existing BED_REPORT_PATTERN
+            matches = BED_REPORT_PATTERN.findall(body)
+
+            # Build capacity dict
+            from app.services.hospital_flows import BED_TYPE_ALIASES
+            capacity = {
+                "icu_available": 0, "ward_available": 0,
+                "emergency_available": 0, "surgical_available": 0,
+                "maternity_available": 0, "pediatric_available": 0,
+            }
+
+            parsed_types = []
+            for match in matches:
+                bed_raw = match[0].lower()
+                count = int(match[1])
+                bed_type = BED_TYPE_ALIASES.get(bed_raw, bed_raw)
+                col = f"{bed_type}_available"
+                if col in capacity:
+                    capacity[col] = count
+                    parsed_types.append(f"{bed_type.upper()}: {count}")
+
+            if not parsed_types:
+                set_session(phone, flow="broadcast_report", step="awaiting_capacity", data={
+                    "broadcast_id": broadcast_id,
+                })
+                await send_text(phone, (
+                    "I couldn't parse those numbers. Please use this format:\n\n"
+                    "ICU: 3, Ward: 12, Emergency: 5\n\n"
+                    "Or type each on a new line."
+                ))
+                return
+
+            # Store the response
+            supabase.table("broadcast_responses").insert({
+                "broadcast_id": broadcast_id,
+                "hospital_id": hospital["id"],
+                "status": "responded",
+                **capacity,
+            }).execute()
+
+            # Update broadcast response count
+            bc = supabase.table("broadcasts").select("hospitals_responded").eq("id", broadcast_id).execute()
+            if bc.data:
+                supabase.table("broadcasts").update({
+                    "hospitals_responded": (bc.data[0]["hospitals_responded"] or 0) + 1,
+                }).eq("id", broadcast_id).execute()
+
+            # Also update the hospital's own bed records
+            now = datetime.now(timezone.utc).isoformat()
+            for match in matches:
+                bed_raw = match[0].lower()
+                count = int(match[1])
+                bed_type = BED_TYPE_ALIASES.get(bed_raw, bed_raw)
+                existing = (
+                    supabase.table("hospital_beds")
+                    .select("id")
+                    .eq("hospital_id", hospital["id"])
+                    .eq("bed_type", bed_type)
+                    .execute()
+                )
+                if existing.data:
+                    supabase.table("hospital_beds").update({
+                        "available_count": count,
+                        "reported_at": now,
+                    }).eq("id", existing.data[0]["id"]).execute()
+
+            supabase.table("hospitals").update({
+                "last_report_at": now,
+                "freshness_score": 1.0,
+            }).eq("id", hospital["id"]).execute()
+
+            summary = ", ".join(parsed_types)
+            await send_text(phone, (
+                f"\u2705 *Capacity received for {hospital['name']}*\n\n"
+                f"{summary}\n\n"
+                f"Stand by for patient assignments."
+            ))
+            print(f"   \U0001f4ca BROADCAST RESPONSE: {hospital['name']} \u2014 {summary}")
+
     else:
-        print(f"   → Unknown flow '{flow}', clearing")
+        print(f"   \u2192 Unknown flow '{flow}', clearing")
         clear_session(phone)
 
 

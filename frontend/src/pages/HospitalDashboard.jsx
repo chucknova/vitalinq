@@ -1,20 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+/**
+ * HospitalDashboard — primary web interface for hospital staff.
+ *
+ * Route: /hospital/:slug/dashboard
+ * No auth (slug = access token for hackathon).
+ * Auto-refreshes every 10 seconds.
+ *
+ * Building section by section:
+ *   A. Bed Status Grid (this file)
+ *   B. Quick Actions Bar
+ *   C. Incoming Patients (added next)
+ *   D. Stats (added next)
+ */
+
+import { useState, useEffect, useRef } from 'react';
+import { useParams, Link } from 'react-router-dom';
 import {
-  AlertTriangle,
-  ArrowLeft,
-  Bed,
-  Check,
-  ChevronDown,
-  Loader2,
-  Minus,
-  Plus,
-  RefreshCw,
-  ShieldCheck,
-  Timer,
-  Users,
-  X,
-  Zap,
+  ArrowLeft, RefreshCw, Plus, Minus, Check, Loader2,
+  Bed, AlertTriangle, Pencil, X, Zap, ChevronDown
 } from 'lucide-react';
 import api from '../lib/api';
 
@@ -29,88 +31,24 @@ const BED_LABELS = {
 };
 
 const BED_COLORS = {
-  icu: { dot: 'bg-red-400', ring: 'ring-red-500/20', soft: 'bg-red-500/10 text-red-200 border-red-500/20' },
-  ward: { dot: 'bg-blue-400', ring: 'ring-blue-500/20', soft: 'bg-blue-500/10 text-blue-200 border-blue-500/20' },
-  maternity: { dot: 'bg-pink-400', ring: 'ring-pink-500/20', soft: 'bg-pink-500/10 text-pink-200 border-pink-500/20' },
-  emergency: { dot: 'bg-amber-400', ring: 'ring-amber-500/20', soft: 'bg-amber-500/10 text-amber-100 border-amber-500/20' },
-  pediatric: { dot: 'bg-violet-400', ring: 'ring-violet-500/20', soft: 'bg-violet-500/10 text-violet-200 border-violet-500/20' },
-  surgical: { dot: 'bg-cyan-400', ring: 'ring-cyan-500/20', soft: 'bg-cyan-500/10 text-cyan-200 border-cyan-500/20' },
-  psychiatric: { dot: 'bg-lime-400', ring: 'ring-lime-500/20', soft: 'bg-lime-500/10 text-lime-200 border-lime-500/20' },
+  icu: { accent: '#ef4444', bg: 'rgba(239,68,68,0.1)', border: 'rgba(239,68,68,0.3)' },
+  ward: { accent: '#3b82f6', bg: 'rgba(59,130,246,0.1)', border: 'rgba(59,130,246,0.3)' },
+  maternity: { accent: '#ec4899', bg: 'rgba(236,72,153,0.1)', border: 'rgba(236,72,153,0.3)' },
+  emergency: { accent: '#f59e0b', bg: 'rgba(245,158,11,0.1)', border: 'rgba(245,158,11,0.3)' },
+  pediatric: { accent: '#8b5cf6', bg: 'rgba(139,92,246,0.1)', border: 'rgba(139,92,246,0.3)' },
+  surgical: { accent: '#06b6d4', bg: 'rgba(6,182,212,0.1)', border: 'rgba(6,182,212,0.3)' },
+  psychiatric: { accent: '#84cc16', bg: 'rgba(132,204,22,0.1)', border: 'rgba(132,204,22,0.3)' },
 };
-
-const URGENCY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
-
-const DECLINE_OPTIONS = [
-  { id: 'no_beds', label: 'No beds available' },
-  { id: 'wrong_specialty', label: 'Wrong specialty' },
-  { id: 'equipment_unavailable', label: 'Equipment unavailable' },
-  { id: 'too_severe', label: 'Condition too severe' },
-  { id: 'too_minor', label: 'Condition too minor' },
-  { id: 'other', label: 'Other reason' },
-];
-
-const URGENCY_OPTIONS = [
-  {
-    id: 'critical',
-    label: 'Critical',
-    desc: 'Life-threatening and needs immediate care',
-    badge: 'bg-red-500/10 text-red-200 border-red-500/20',
-  },
-  {
-    id: 'high',
-    label: 'High',
-    desc: 'Serious condition, but currently stable',
-    badge: 'bg-amber-500/10 text-amber-100 border-amber-500/20',
-  },
-  {
-    id: 'medium',
-    label: 'Medium',
-    desc: 'Needs prompt care but is not critical',
-    badge: 'bg-yellow-500/10 text-yellow-100 border-yellow-500/20',
-  },
-];
-
-const pageShellClass = 'min-h-screen bg-slate-950 text-slate-100';
-const surfaceClass =
-  'rounded-3xl border border-slate-800 bg-slate-900/80 shadow-[0_1px_2px_rgba(15,23,42,0.35)]';
-const subtleSurfaceClass = 'rounded-2xl border border-slate-800/80 bg-slate-900/45';
-const primaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition focus:outline-none focus:ring-4 focus:ring-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50';
-const secondaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 focus:outline-none focus:ring-4 focus:ring-slate-500/20 disabled:cursor-not-allowed disabled:opacity-50';
 
 function formatTime(iso) {
   if (!iso) return 'Never';
-  const date = new Date(iso);
+  const d = new Date(iso);
   const now = new Date();
-  const hrs = (now - date) / (1000 * 60 * 60);
+  const hrs = (now - d) / (1000 * 60 * 60);
   if (hrs < 0.1) return 'Just now';
   if (hrs < 1) return `${Math.round(hrs * 60)}m ago`;
   if (hrs < 24) return `${Math.round(hrs)}h ago`;
   return `${Math.round(hrs / 24)}d ago`;
-}
-
-function getUrgencyConfig(urgency) {
-  return (
-    {
-      critical: { label: 'Critical', className: 'bg-red-500/10 text-red-200 border-red-500/20' },
-      high: { label: 'High', className: 'bg-amber-500/10 text-amber-100 border-amber-500/20' },
-      medium: { label: 'Medium', className: 'bg-yellow-500/10 text-yellow-100 border-yellow-500/20' },
-      low: { label: 'Low', className: 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20' },
-    }[urgency] || null
-  );
-}
-
-function getFreshnessTone(score) {
-  if (score >= 0.8) return 'emerald';
-  if (score >= 0.4) return 'amber';
-  return 'red';
-}
-
-function getFreshnessLabel(score) {
-  if (score >= 0.8) return 'Fresh';
-  if (score >= 0.4) return 'Getting stale';
-  return 'Stale';
 }
 
 export default function HospitalDashboard() {
@@ -123,18 +61,18 @@ export default function HospitalDashboard() {
   const [sortBy, setSortBy] = useState('time');
   const intervalRef = useRef(null);
 
-  const sortedHandshakes = useMemo(() => {
-    if (!data?.active_handshakes) return [];
-    return [...data.active_handshakes].sort((a, b) => {
-      if (sortBy === 'urgency') {
-        const aUrg = a.parsed_requirements?.urgency || 'medium';
-        const bUrg = b.parsed_requirements?.urgency || 'medium';
-        return (URGENCY_ORDER[aUrg] ?? 3) - (URGENCY_ORDER[bUrg] ?? 3);
-      }
-      return new Date(b.created_at) - new Date(a.created_at);
-    });
-  }, [data?.active_handshakes, sortBy]);
+  // Sort handshakes
+  const URGENCY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
+  const sortedHandshakes = data?.active_handshakes ? [...data.active_handshakes].sort((a, b) => {
+    if (sortBy === 'urgency') {
+      const aUrg = a.parsed_requirements?.urgency || 'medium';
+      const bUrg = b.parsed_requirements?.urgency || 'medium';
+      return (URGENCY_ORDER[aUrg] ?? 3) - (URGENCY_ORDER[bUrg] ?? 3);
+    }
+    return new Date(b.created_at) - new Date(a.created_at);
+  }) : [];
 
+  // ── Fetch dashboard data ───────────────────────────
   async function fetchDashboard() {
     try {
       const res = await api.get(`/api/hospitals/dashboard/${slug}`);
@@ -158,150 +96,147 @@ export default function HospitalDashboard() {
     return () => clearInterval(intervalRef.current);
   }, [slug]);
 
+  // ── Bed actions ────────────────────────────────────
   async function handleIncrement(bedType) {
-    setActionLoading((prev) => ({ ...prev, [bedType]: 'inc' }));
+    setActionLoading(prev => ({ ...prev, [bedType]: 'inc' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/beds/${bedType}/increment`);
-      setData((prev) => ({
+      // Optimistic update
+      setData(prev => ({
         ...prev,
-        beds: prev.beds.map((bed) =>
-          bed.bed_type === bedType
-            ? {
-                ...bed,
-                available_count: Math.min(
-                  (bed.available_count || 0) + 1,
-                  bed.total_count || 999
-                ),
-              }
-            : bed
+        beds: prev.beds.map(b =>
+          b.bed_type === bedType
+            ? { ...b, available_count: Math.min((b.available_count || 0) + 1, b.total_count || 999) }
+            : b
         ),
       }));
     } catch (err) {
       console.error('Increment failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, [bedType]: null }));
+      setActionLoading(prev => ({ ...prev, [bedType]: null }));
     }
   }
 
   async function handleDecrement(bedType) {
-    setActionLoading((prev) => ({ ...prev, [bedType]: 'dec' }));
+    setActionLoading(prev => ({ ...prev, [bedType]: 'dec' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/beds/${bedType}/decrement`);
-      setData((prev) => ({
+      setData(prev => ({
         ...prev,
-        beds: prev.beds.map((bed) =>
-          bed.bed_type === bedType
-            ? { ...bed, available_count: Math.max((bed.available_count || 0) - 1, 0) }
-            : bed
+        beds: prev.beds.map(b =>
+          b.bed_type === bedType
+            ? { ...b, available_count: Math.max((b.available_count || 0) - 1, 0) }
+            : b
         ),
       }));
     } catch (err) {
       console.error('Decrement failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, [bedType]: null }));
+      setActionLoading(prev => ({ ...prev, [bedType]: null }));
     }
   }
 
+  // ── Quick actions ──────────────────────────────────
   async function handleStillAccurate() {
-    setActionLoading((prev) => ({ ...prev, _global: 'accurate' }));
+    setActionLoading(prev => ({ ...prev, _global: 'accurate' }));
     try {
-      const beds = data.beds.map((bed) => ({
-        bed_type: bed.bed_type,
-        available_count: bed.available_count || 0,
-        overflow_count: bed.overflow_count || 0,
+      // Use the existing bed update endpoint to refresh timestamps
+      const beds = data.beds.map(b => ({
+        bed_type: b.bed_type,
+        available_count: b.available_count || 0,
+        overflow_count: b.overflow_count || 0,
       }));
       await api.post(`/api/hospitals/dashboard/${slug}/beds`, {
         beds,
-        reported_by: 'Dashboard - Still Accurate',
+        reported_by: 'Dashboard — Still Accurate',
       });
       await fetchDashboard();
     } catch (err) {
       console.error('Still accurate failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, _global: null }));
+      setActionLoading(prev => ({ ...prev, _global: null }));
     }
   }
 
   async function handleAllFull() {
     if (!confirm('Set ALL bed types to zero? This cannot be undone.')) return;
-    setActionLoading((prev) => ({ ...prev, _global: 'full' }));
+    setActionLoading(prev => ({ ...prev, _global: 'full' }));
     try {
-      const beds = data.beds.map((bed) => ({
-        bed_type: bed.bed_type,
+      const beds = data.beds.map(b => ({
+        bed_type: b.bed_type,
         available_count: 0,
         overflow_count: 0,
       }));
       await api.post(`/api/hospitals/dashboard/${slug}/beds`, {
         beds,
-        reported_by: 'Dashboard - All Full',
+        reported_by: 'Dashboard — All Full',
       });
       await fetchDashboard();
     } catch (err) {
       console.error('All full failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, _global: null }));
+      setActionLoading(prev => ({ ...prev, _global: null }));
     }
   }
 
+  // ── Handshake actions ──────────────────────────────
   async function handleAccept(handshakeId) {
-    setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'accept' }));
+    setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: 'accept' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/accept/${handshakeId}`);
       await fetchDashboard();
     } catch (err) {
       console.error('Accept failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: null }));
+      setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: null }));
     }
   }
 
   async function handleDecline(handshakeId, reason = 'no_beds') {
-    setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'decline' }));
+    setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: 'decline' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/decline/${handshakeId}`, { reason });
       await fetchDashboard();
     } catch (err) {
       console.error('Decline failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: null }));
+      setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: null }));
     }
   }
 
   async function handleOverride(handshakeId, walkinUrgency) {
-    setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'override' }));
+    setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: 'override' }));
     try {
-      await api.post(`/api/hospitals/dashboard/${slug}/override/${handshakeId}`, {
+      const res = await api.post(`/api/hospitals/dashboard/${slug}/override/${handshakeId}`, {
         walkin_urgency: walkinUrgency,
       });
       await fetchDashboard();
     } catch (err) {
       console.error('Override failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: null }));
+      setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: null }));
     }
   }
 
   async function handleComplete(handshakeId) {
-    setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'complete' }));
+    setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: 'complete' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/complete/${handshakeId}`);
       await fetchDashboard();
     } catch (err) {
       console.error('Complete failed:', err);
     } finally {
-      setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: null }));
+      setActionLoading(prev => ({ ...prev, [`hs_${handshakeId}`]: null }));
     }
   }
 
+  // ── Loading state ──────────────────────────────────
   if (loading) {
     return (
-      <div className={`${pageShellClass} flex items-center justify-center px-6`}>
+      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center">
         <div className="text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-cyan-500/20 bg-cyan-500/10">
-            <Loader2 size={22} className="animate-spin text-cyan-300" />
-          </div>
-          <p className="text-sm font-medium text-slate-300">Loading hospital dashboard</p>
-          <p className="mt-1 text-sm text-slate-500">Preparing live bed status and incoming patients.</p>
+          <div className="w-10 h-10 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-gray-400 text-sm">Loading dashboard...</p>
         </div>
       </div>
     );
@@ -309,499 +244,363 @@ export default function HospitalDashboard() {
 
   if (error) {
     return (
-      <div className={`${pageShellClass} flex items-center justify-center px-6`}>
-        <div className={`${surfaceClass} w-full max-w-md p-8 text-center`}>
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-red-500/20 bg-red-500/10">
-            <AlertTriangle size={26} className="text-red-300" />
-          </div>
-          <h1 className="text-xl font-semibold text-white">Unable to load dashboard</h1>
-          <p className="mt-2 text-sm leading-6 text-slate-400">{error}</p>
+      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center p-6">
+        <div className="text-center">
+          <AlertTriangle size={40} className="text-red-400 mx-auto mb-3" />
+          <p className="text-white text-lg font-medium mb-1">Error</p>
+          <p className="text-gray-400 text-sm">{error}</p>
         </div>
       </div>
     );
   }
 
   const { hospital, beds, active_handshakes, stats } = data;
-  const totalAvailableBeds = beds.reduce((sum, bed) => sum + (bed.available_count || 0), 0);
-  const totalCapacity = beds.reduce((sum, bed) => sum + (bed.total_count || 0), 0);
-  const totalOverflow = beds.reduce((sum, bed) => sum + (bed.overflow_count || 0), 0);
 
   return (
-    <div className={pageShellClass}>
-      <header className="sticky top-0 z-20 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex items-start gap-3">
-              <Link
-                to="/"
-                aria-label="Back to home"
-                className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 text-slate-300 transition hover:border-slate-600 hover:bg-slate-800 hover:text-white focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
-              >
-                <ArrowLeft size={18} />
-              </Link>
-
-              <div className="min-w-0">
-                <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                  Hospital operations
-                </p>
-                <h1 className="truncate text-2xl font-semibold tracking-tight text-white">
-                  {hospital.name}
-                </h1>
-                <p className="mt-1 text-sm text-slate-400">
-                  Live bed management, patient intake, and operational signals in one place.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Link
-                to={`/log/${slug}`}
-                className={`${secondaryButtonClass} justify-center`}
-              >
-                <Users size={16} />
-                Patient log
-              </Link>
-
-              <div className={`${subtleSurfaceClass} flex items-center gap-2 px-3 py-2`}>
-                <RefreshCw
-                  size={14}
-                  className="text-slate-500 animate-spin"
-                  style={{ animationDuration: '10s' }}
-                />
-                <div className="text-sm">
-                  <p className="font-medium text-slate-300">Auto-refreshing</p>
-                  <p className="text-slate-500">
-                    {lastRefresh ? `Updated ${formatTime(lastRefresh.toISOString())}` : 'Waiting for refresh'}
-                  </p>
-                </div>
-              </div>
+    <div className="min-h-screen bg-[#0a0f1a]">
+      {/* ── Header ────────────────────────────────────── */}
+      <div className="border-b border-gray-800/50 px-4 py-3 sticky top-0 bg-[#0a0f1a]/95 backdrop-blur-sm z-10">
+        <div className="max-w-5xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Link to="/" className="text-gray-500 hover:text-white transition-colors">
+              <ArrowLeft size={18} />
+            </Link>
+            <div>
+              <h1 className="text-white text-sm font-semibold">{hospital.name}</h1>
+              <p className="text-gray-500 text-[10px]">Hospital Dashboard</p>
             </div>
           </div>
-
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            <SummaryTile
-              icon={<Bed size={18} className="text-cyan-300" />}
-              label="Beds available now"
-              value={totalAvailableBeds}
-              detail={`${totalCapacity} total capacity`}
-            />
-            <SummaryTile
-              icon={<Zap size={18} className="text-amber-300" />}
-              label="Incoming patients"
-              value={active_handshakes.length}
-              detail={active_handshakes.some((item) => item.status === 'accepted') ? 'Includes active holds' : 'No active holds yet'}
-            />
-            <SummaryTile
-              icon={<ShieldCheck size={18} className="text-emerald-300" />}
-              label="Reporting freshness"
-              value={stats.hours_since_last_report != null ? `${stats.hours_since_last_report}h` : '—'}
-              detail={getFreshnessLabel(stats.freshness_score || 0)}
-            />
+          <div className="flex items-center gap-3">
+            <Link
+              to={`/log/${slug}`}
+              className="text-gray-500 hover:text-cyan-400 text-xs transition-colors"
+            >
+              Patient Log →
+            </Link>
+            <div className="text-right">
+              <p className="text-gray-600 text-[10px] flex items-center gap-1">
+                <RefreshCw size={8} className="animate-spin" style={{ animationDuration: '10s' }} />
+                {lastRefresh ? formatTime(lastRefresh.toISOString()) : '—'}
+              </p>
+            </div>
           </div>
         </div>
-      </header>
+      </div>
 
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-        <section className="mb-6 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-          <div>
-            <h2 className="text-lg font-semibold text-white">Quick actions</h2>
-            <p className="mt-1 text-sm text-slate-400">
-              Use these for full-dashboard updates when the live numbers are still accurate or all capacity is unavailable.
-            </p>
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <button
-              type="button"
-              onClick={handleStillAccurate}
-              disabled={!!actionLoading._global}
-              className={`${primaryButtonClass} bg-emerald-500/12 text-emerald-100 border border-emerald-500/20 hover:bg-emerald-500/18`}
-            >
-              {actionLoading._global === 'accurate' ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <Check size={16} />
-              )}
-              All still accurate
-            </button>
-            <button
-              type="button"
-              onClick={handleAllFull}
-              disabled={!!actionLoading._global}
-              className={`${primaryButtonClass} bg-red-500/12 text-red-100 border border-red-500/20 hover:bg-red-500/18`}
-            >
-              {actionLoading._global === 'full' ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <AlertTriangle size={16} />
-              )}
-              Mark all full
-            </button>
-          </div>
-        </section>
+      <div className="max-w-5xl mx-auto px-4 py-6">
 
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.9fr)]">
-          <section className="space-y-6">
-            <div>
-              <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold text-white">Bed availability</h2>
-                  <p className="mt-1 text-sm text-slate-400">
-                    Update live capacity by unit with one-tap actions and clear status visibility.
-                  </p>
-                </div>
-                <div className={`${subtleSurfaceClass} flex items-center gap-4 px-4 py-3 text-sm`}>
-                  <div>
-                    <p className="text-slate-500">Open beds</p>
-                    <p className="font-semibold text-white">{totalAvailableBeds}</p>
-                  </div>
-                  <div className="h-8 w-px bg-slate-800" />
-                  <div>
-                    <p className="text-slate-500">Overflow</p>
-                    <p className="font-semibold text-white">{totalOverflow}</p>
-                  </div>
-                </div>
-              </div>
+        {/* ── Section B: Quick Actions ─────────────────── */}
+        <div className="flex gap-2 mb-6">
+          <button
+            onClick={handleStillAccurate}
+            disabled={actionLoading._global}
+            className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-medium py-2.5 rounded-lg transition-all flex items-center justify-center gap-1.5"
+          >
+            {actionLoading._global === 'accurate' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+            All Still Accurate
+          </button>
+          <button
+            onClick={handleAllFull}
+            disabled={actionLoading._global}
+            className="flex-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-medium py-2.5 rounded-lg transition-all flex items-center justify-center gap-1.5"
+          >
+            {actionLoading._global === 'full' ? <Loader2 size={12} className="animate-spin" /> : <AlertTriangle size={12} />}
+            All Full
+          </button>
+        </div>
 
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
-                {beds.map((bed) => (
-                  <BedCard
-                    key={bed.bed_type}
-                    bed={bed}
-                    loadingState={actionLoading[bed.bed_type]}
-                    onIncrement={handleIncrement}
-                    onDecrement={handleDecrement}
-                  />
-                ))}
-              </div>
-            </div>
+        {/* ── Section A: Bed Status Grid ───────────────── */}
+        <h2 className="text-white text-sm font-semibold mb-3 flex items-center gap-2">
+          <Bed size={15} className="text-cyan-400" />
+          Bed Availability
+        </h2>
 
-            <div>
-              <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold text-white">Hospital stats</h2>
-                  <p className="mt-1 text-sm text-slate-400">
-                    Performance and freshness signals for the last reporting window.
-                  </p>
-                </div>
-              </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-8">
+          {beds.map((bed) => {
+            const label = BED_LABELS[bed.bed_type] || bed.bed_type;
+            const colors = BED_COLORS[bed.bed_type] || BED_COLORS.ward;
+            const avail = bed.available_count || 0;
+            const total = bed.total_count || 0;
+            const overflow = bed.overflow_count || 0;
+            const pct = total > 0 ? (avail / total) * 100 : 0;
+            const isLoading = actionLoading[bed.bed_type];
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <StatCard
-                  label="Accuracy"
-                  value={`${Math.round((stats.accuracy_score || 0.5) * 100)}%`}
-                  sub={stats.trust_tier || 'Unknown'}
-                  tone={stats.trust_tier === 'verified' ? 'emerald' : stats.trust_tier === 'unverified' ? 'red' : 'slate'}
-                />
-                <StatCard
-                  label="Patients routed (7d)"
-                  value={stats.patients_routed_7d || 0}
-                  sub={`${stats.patients_admitted_7d || 0} admitted`}
-                  tone="cyan"
-                />
-                <StatCard
-                  label="Today"
-                  value={stats.handshakes_today || 0}
-                  sub={`${stats.handshakes_today_by_status?.completed || 0} completed`}
-                  tone="blue"
-                />
-                <StatCard
-                  label="Last update"
-                  value={stats.hours_since_last_report != null ? `${stats.hours_since_last_report}h` : '—'}
-                  sub={getFreshnessLabel(stats.freshness_score || 0)}
-                  tone={getFreshnessTone(stats.freshness_score || 0)}
-                />
-              </div>
-            </div>
-          </section>
-
-          <section className="space-y-4">
-            <div className={`${surfaceClass} p-5 sm:p-6`}>
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-                <div>
+            return (
+              <div
+                key={bed.bed_type}
+                className="bg-[#151d2e] border rounded-xl p-4 transition-all"
+                style={{ borderColor: colors.border }}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold text-white">Incoming patients</h2>
-                    {active_handshakes.length > 0 && (
-                      <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-xs font-semibold text-cyan-200">
-                        {active_handshakes.length}
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-1 text-sm text-slate-400">
-                    Review incoming transfer requests, confirm holds, and manage arrivals.
-                  </p>
-                </div>
-
-                {active_handshakes.length > 1 && (
-                  <div className="flex items-center gap-2">
-                    <label htmlFor="sort-handshakes" className="text-sm text-slate-500">
-                      Sort
-                    </label>
-                    <select
-                      id="sort-handshakes"
-                      value={sortBy}
-                      onChange={(event) => setSortBy(event.target.value)}
-                      className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-500/10"
-                    >
-                      <option value="time">Newest first</option>
-                      <option value="urgency">Most urgent</option>
-                    </select>
-                  </div>
-                )}
-              </div>
-
-              {active_handshakes.length === 0 ? (
-                <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/40 px-4 py-10 text-center">
-                  <p className="text-base font-medium text-slate-300">No incoming patients right now</p>
-                  <p className="mt-2 text-sm text-slate-500">
-                    New transfer requests will appear here automatically.
-                  </p>
-                </div>
-              ) : (
-                <div className="mt-6 space-y-4">
-                  {sortedHandshakes.map((handshake) => (
-                    <HandshakeCard
-                      key={handshake.id}
-                      handshake={handshake}
-                      loadingState={actionLoading[`hs_${handshake.id}`]}
-                      onAccept={handleAccept}
-                      onDecline={handleDecline}
-                      onComplete={handleComplete}
-                      onOverride={handleOverride}
+                    <div
+                      className="w-2.5 h-2.5 rounded-full"
+                      style={{ backgroundColor: colors.accent }}
                     />
-                  ))}
+                    <span className="text-white text-sm font-medium">{label}</span>
+                  </div>
+                  <span className="text-gray-600 text-[10px]">
+                    {formatTime(bed.reported_at)}
+                  </span>
                 </div>
-              )}
-            </div>
-          </section>
+
+                {/* Big number */}
+                <div className="flex items-end justify-between mb-3">
+                  <div>
+                    <span className="text-white text-4xl font-bold leading-none">{avail}</span>
+                    <span className="text-gray-500 text-sm ml-1">/ {total}</span>
+                  </div>
+                  {overflow > 0 && (
+                    <span className="text-amber-400 text-xs bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                      +{overflow} overflow
+                    </span>
+                  )}
+                </div>
+
+                {/* Capacity bar */}
+                <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden mb-3">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${Math.min(pct, 100)}%`,
+                      backgroundColor: pct > 50 ? '#10b981' : pct > 10 ? '#f59e0b' : '#ef4444',
+                    }}
+                  />
+                </div>
+
+                {/* +1 / -1 buttons */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleDecrement(bed.bed_type)}
+                    disabled={isLoading || avail <= 0}
+                    className="flex-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-white py-2 rounded-lg transition-all flex items-center justify-center"
+                  >
+                    {isLoading === 'dec' ? <Loader2 size={14} className="animate-spin" /> : <Minus size={14} />}
+                  </button>
+                  <button
+                    onClick={() => handleIncrement(bed.bed_type)}
+                    disabled={isLoading || avail >= total}
+                    className="flex-1 text-white py-2 rounded-lg transition-all flex items-center justify-center"
+                    style={{
+                      backgroundColor: colors.accent + '33',
+                      border: `1px solid ${colors.border}`,
+                    }}
+                    onMouseEnter={e => e.target.style.backgroundColor = colors.accent + '55'}
+                    onMouseLeave={e => e.target.style.backgroundColor = colors.accent + '33'}
+                  >
+                    {isLoading === 'inc' ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      </main>
-    </div>
-  );
-}
 
-function SummaryTile({ icon, label, value, detail }) {
-  return (
-    <div className={`${surfaceClass} flex items-start gap-3 p-4`}>
-      <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl border border-slate-800 bg-slate-950/60">
-        {icon}
-      </div>
-      <div className="min-w-0">
-        <p className="text-sm text-slate-500">{label}</p>
-        <p className="mt-1 text-2xl font-semibold tracking-tight text-white">{value}</p>
-        <p className="mt-1 text-sm text-slate-400">{detail}</p>
-      </div>
-    </div>
-  );
-}
+        {/* ── Section C: Incoming Patients ──────────────── */}
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-white text-sm font-semibold flex items-center gap-2">
+            <Zap size={15} className="text-cyan-400" />
+            Incoming Patients
+            {active_handshakes.length > 0 && (
+              <span className="bg-cyan-500/20 text-cyan-400 text-[10px] font-bold px-1.5 py-0.5 rounded">
+                {active_handshakes.length}
+              </span>
+            )}
+          </h2>
+          {active_handshakes.length > 1 && (
+            <select
+              value={sortBy}
+              onChange={e => setSortBy(e.target.value)}
+              className="bg-[#151d2e] border border-gray-700/50 rounded-lg px-2 py-1 text-[10px] text-gray-400 focus:outline-none focus:border-cyan-500/50"
+            >
+              <option value="time">Sort: Newest first</option>
+              <option value="urgency">Sort: Most urgent</option>
+            </select>
+          )}
+        </div>
 
-function BedCard({ bed, loadingState, onIncrement, onDecrement }) {
-  const label = BED_LABELS[bed.bed_type] || bed.bed_type;
-  const color = BED_COLORS[bed.bed_type] || BED_COLORS.ward;
-  const available = bed.available_count || 0;
-  const total = bed.total_count || 0;
-  const overflow = bed.overflow_count || 0;
-  const pct = total > 0 ? (available / total) * 100 : 0;
-  const capacityTone =
-    pct > 50 ? 'bg-emerald-400' : pct > 10 ? 'bg-amber-400' : 'bg-red-400';
-
-  return (
-    <article className={`${surfaceClass} p-5`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className={`h-2.5 w-2.5 rounded-full ${color.dot}`} aria-hidden="true" />
-            <h3 className="text-base font-semibold text-white">{label}</h3>
+        {active_handshakes.length === 0 ? (
+          <div className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-8 text-center mb-8">
+            <p className="text-gray-500 text-sm">No incoming patients right now</p>
           </div>
-          <p className="mt-1 text-sm text-slate-500">Updated {formatTime(bed.reported_at)}</p>
-        </div>
-        <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${color.soft}`}>
-          {total > 0 ? `${Math.round(pct)}% open` : 'No total set'}
-        </span>
-      </div>
+        ) : (
+          <div className="space-y-2 mb-8">
+            {sortedHandshakes.map((hs) => {
+              const isAccepted = hs.status === 'accepted';
+              const remaining = hs.time_remaining_sec;
+              const hsLoading = actionLoading[`hs_${hs.id}`];
+              const urgency = hs.parsed_requirements?.urgency || hs._urgency || null;
 
-      <div className="mt-6 flex items-end justify-between gap-3">
-        <div>
-          <p className="text-4xl font-semibold tracking-tight text-white">{available}</p>
-          <p className="mt-1 text-sm text-slate-500">available of {total}</p>
-        </div>
-        {overflow > 0 && (
-          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-right">
-            <p className="text-xs font-medium uppercase tracking-[0.16em] text-amber-200/80">Overflow</p>
-            <p className="mt-1 text-sm font-semibold text-amber-100">+{overflow}</p>
+              const urgencyConfig = {
+                critical: { label: 'CRITICAL', color: 'bg-red-500/20 text-red-400 border-red-500/30' },
+                high: { label: 'HIGH', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30' },
+                medium: { label: 'MEDIUM', color: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' },
+                low: { label: 'LOW', color: 'bg-green-500/20 text-green-400 border-green-500/30' },
+              };
+              const uConfig = urgencyConfig[urgency] || null;
+
+              return (
+                <div
+                  key={hs.id}
+                  className={`bg-[#151d2e] border rounded-xl p-4 ${
+                    isAccepted ? 'border-cyan-500/30' : 'border-amber-500/30'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1">
+                      {/* Transfer code + bed type + urgency + status */}
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="text-white font-mono font-bold text-sm">{hs.transfer_code}</span>
+                        <span className="text-gray-600 text-[10px]">{(hs.bed_type || '').toUpperCase()}</span>
+                        {uConfig && (
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${uConfig.color}`}>
+                            {uConfig.label}
+                          </span>
+                        )}
+                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${
+                          isAccepted
+                            ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30'
+                            : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                        }`}>
+                          {isAccepted ? 'Held' : 'Incoming'}
+                        </span>
+                      </div>
+
+                      {/* Patient summary */}
+                      {hs.patient_summary && (
+                        <p className="text-gray-400 text-xs mb-2 line-clamp-2">{hs.patient_summary}</p>
+                      )}
+
+                      {/* Countdown for accepted */}
+                      {isAccepted && remaining > 0 && (
+                        <p className="text-cyan-400 text-xs font-mono">
+                          Hold expires in {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}
+                        </p>
+                      )}
+
+                      {/* Live ETA — shows when patient is sharing position */}
+                      {isAccepted && hs.patient_lat && hs.patient_lng && (
+                        <PatientETA
+                          patientLat={hs.patient_lat}
+                          patientLng={hs.patient_lng}
+                          hospitalLat={hospital.lat}
+                          hospitalLng={hospital.lng}
+                          positionAt={hs.patient_position_at}
+                        />
+                      )}
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex gap-2 flex-shrink-0">
+                      {!isAccepted && (
+                        <>
+                          <button
+                            onClick={() => handleAccept(hs.id)}
+                            disabled={hsLoading}
+                            className="bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-400 text-xs font-medium px-3 py-1.5 rounded-lg transition-all flex items-center gap-1"
+                          >
+                            {hsLoading === 'accept' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                            Accept
+                          </button>
+                          <DeclineDropdown
+                            onDecline={(reason) => handleDecline(hs.id, reason)}
+                            loading={hsLoading === 'decline'}
+                          />
+                        </>
+                      )}
+                      {isAccepted && (
+                        <>
+                          <button
+                            onClick={() => handleComplete(hs.id)}
+                            disabled={hsLoading}
+                            className="bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-400 text-xs font-medium px-3 py-1.5 rounded-lg transition-all flex items-center gap-1"
+                          >
+                            {hsLoading === 'complete' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                            Arrived
+                          </button>
+                          <OverrideButton
+                            onOverride={(urgency) => handleOverride(hs.id, urgency)}
+                            loading={hsLoading === 'override'}
+                            transferCode={hs.transfer_code}
+                            bedType={hs.bed_type}
+                            heldUrgency={urgency}
+                          />
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
-      </div>
 
-      <div className="mt-5">
-        <div className="h-2 rounded-full bg-slate-800">
-          <div
-            className={`h-2 rounded-full transition-all duration-500 ${capacityTone}`}
-            style={{ width: `${Math.min(pct, 100)}%` }}
+        {/* ── Section D: Stats ─────────────────────────── */}
+        <h2 className="text-white text-sm font-semibold mb-3">Hospital Stats</h2>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
+          <StatCard
+            label="Accuracy"
+            value={`${Math.round((stats.accuracy_score || 0.5) * 100)}%`}
+            sub={stats.trust_tier}
+            color={stats.trust_tier === 'verified' ? 'emerald' : stats.trust_tier === 'unverified' ? 'red' : 'gray'}
+          />
+          <StatCard
+            label="Patients (7d)"
+            value={stats.patients_routed_7d || 0}
+            sub={`${stats.patients_admitted_7d || 0} admitted`}
+            color="cyan"
+          />
+          <StatCard
+            label="Today"
+            value={stats.handshakes_today || 0}
+            sub={`${stats.handshakes_today_by_status?.completed || 0} completed`}
+            color="blue"
+          />
+          <StatCard
+            label="Last Update"
+            value={stats.hours_since_last_report != null ? `${stats.hours_since_last_report}h` : '—'}
+            sub={stats.freshness_score >= 0.8 ? 'Fresh' : stats.freshness_score >= 0.4 ? 'Getting stale' : 'Stale'}
+            color={stats.freshness_score >= 0.8 ? 'emerald' : stats.freshness_score >= 0.4 ? 'amber' : 'red'}
           />
         </div>
       </div>
-
-      <div className="mt-5 grid grid-cols-2 gap-3">
-        <button
-          type="button"
-          onClick={() => onDecrement(bed.bed_type)}
-          disabled={!!loadingState || available <= 0}
-          aria-label={`Decrease ${label} availability`}
-          className={secondaryButtonClass}
-        >
-          {loadingState === 'dec' ? <Loader2 size={16} className="animate-spin" /> : <Minus size={16} />}
-          Mark occupied
-        </button>
-        <button
-          type="button"
-          onClick={() => onIncrement(bed.bed_type)}
-          disabled={!!loadingState || available >= total}
-          aria-label={`Increase ${label} availability`}
-          className={`${primaryButtonClass} bg-cyan-500 text-slate-950 hover:bg-cyan-400`}
-        >
-          {loadingState === 'inc' ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
-          Mark open
-        </button>
-      </div>
-    </article>
-  );
-}
-
-function HandshakeCard({
-  handshake,
-  loadingState,
-  onAccept,
-  onDecline,
-  onComplete,
-  onOverride,
-}) {
-  const isAccepted = handshake.status === 'accepted';
-  const urgency = handshake.parsed_requirements?.urgency || handshake._urgency || null;
-  const urgencyConfig = getUrgencyConfig(urgency);
-  const bedTypeLabel = BED_LABELS[handshake.bed_type] || (handshake.bed_type || '').toUpperCase();
-
-  return (
-    <article
-      className={`rounded-2xl border p-4 ${
-        isAccepted
-          ? 'border-cyan-500/20 bg-cyan-500/5'
-          : 'border-slate-800 bg-slate-950/40'
-      }`}
-    >
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-base font-semibold tracking-[0.16em] text-white">
-                {handshake.transfer_code}
-              </span>
-              <Badge>{bedTypeLabel}</Badge>
-              {urgencyConfig && <Badge className={urgencyConfig.className}>{urgencyConfig.label}</Badge>}
-              <Badge
-                className={
-                  isAccepted
-                    ? 'bg-cyan-500/10 text-cyan-200 border-cyan-500/20'
-                    : 'bg-amber-500/10 text-amber-100 border-amber-500/20'
-                }
-              >
-                {isAccepted ? 'Held' : 'Incoming'}
-              </Badge>
-            </div>
-
-            {handshake.patient_summary && (
-              <p className="mt-3 text-sm leading-6 text-slate-300">{handshake.patient_summary}</p>
-            )}
-
-            <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-slate-500">
-              <span>Requested {formatTime(handshake.created_at)}</span>
-              {isAccepted && handshake.time_remaining_sec > 0 && (
-                <span className="inline-flex items-center gap-2 text-cyan-200">
-                  <Timer size={14} />
-                  Hold expires in {Math.floor(handshake.time_remaining_sec / 60)}:
-                  {String(handshake.time_remaining_sec % 60).padStart(2, '0')}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-2 sm:items-end">
-            {!isAccepted ? (
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <button
-                  type="button"
-                  onClick={() => onAccept(handshake.id)}
-                  disabled={!!loadingState}
-                  className={`${primaryButtonClass} bg-emerald-500 text-white hover:bg-emerald-400`}
-                >
-                  {loadingState === 'accept' ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Check size={16} />
-                  )}
-                  Accept hold
-                </button>
-                <DeclineDropdown
-                  onDecline={(reason) => onDecline(handshake.id, reason)}
-                  loading={loadingState === 'decline'}
-                />
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <button
-                  type="button"
-                  onClick={() => onComplete(handshake.id)}
-                  disabled={!!loadingState}
-                  className={`${primaryButtonClass} bg-emerald-500 text-white hover:bg-emerald-400`}
-                >
-                  {loadingState === 'complete' ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <Check size={16} />
-                  )}
-                  Mark arrived
-                </button>
-                <OverrideButton
-                  onOverride={(walkinUrgency) => onOverride(handshake.id, walkinUrgency)}
-                  loading={loadingState === 'override'}
-                  transferCode={handshake.transfer_code}
-                  bedType={handshake.bed_type}
-                  heldUrgency={urgency}
-                />
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function StatCard({ label, value, sub, tone }) {
-  const tones = {
-    emerald: 'border-emerald-500/20 bg-emerald-500/5 text-emerald-100',
-    cyan: 'border-cyan-500/20 bg-cyan-500/5 text-cyan-100',
-    blue: 'border-blue-500/20 bg-blue-500/5 text-blue-100',
-    amber: 'border-amber-500/20 bg-amber-500/5 text-amber-100',
-    red: 'border-red-500/20 bg-red-500/5 text-red-100',
-    slate: 'border-slate-800 bg-slate-900/55 text-slate-100',
-  };
-
-  return (
-    <div className={`rounded-2xl border p-4 ${tones[tone] || tones.slate}`}>
-      <p className="text-sm text-slate-500">{label}</p>
-      <p className="mt-2 text-2xl font-semibold tracking-tight">{value}</p>
-      <p className="mt-1 text-sm text-slate-400">{sub}</p>
     </div>
   );
 }
 
-function Badge({ children, className = 'bg-slate-900 text-slate-300 border-slate-700' }) {
+
+// ── Stat Card Component ──────────────────────────────
+function StatCard({ label, value, sub, color }) {
+  const colors = {
+    emerald: 'border-emerald-500/30 text-emerald-400',
+    cyan: 'border-cyan-500/30 text-cyan-400',
+    blue: 'border-blue-500/30 text-blue-400',
+    amber: 'border-amber-500/30 text-amber-400',
+    red: 'border-red-500/30 text-red-400',
+    gray: 'border-gray-700/50 text-gray-400',
+  };
+
   return (
-    <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${className}`}>
-      {children}
-    </span>
+    <div className={`bg-[#151d2e] border rounded-xl p-3 ${colors[color] || colors.gray}`}>
+      <p className="text-gray-500 text-[10px] mb-1">{label}</p>
+      <p className={`text-xl font-bold ${colors[color]?.split(' ')[1] || 'text-white'}`}>{value}</p>
+      <p className="text-gray-600 text-[10px] mt-0.5">{sub}</p>
+    </div>
   );
 }
+
+
+// ── Decline Dropdown Component ───────────────────────
+const DECLINE_OPTIONS = [
+  { id: 'no_beds', label: 'No beds available' },
+  { id: 'wrong_specialty', label: 'Wrong specialty' },
+  { id: 'equipment_unavailable', label: 'Equipment unavailable' },
+  { id: 'too_severe', label: 'Condition too severe' },
+  { id: 'too_minor', label: 'Condition too minor' },
+  { id: 'other', label: 'Other reason' },
+];
 
 function DeclineDropdown({ onDecline, loading }) {
   const [open, setOpen] = useState(false);
@@ -809,34 +608,24 @@ function DeclineDropdown({ onDecline, loading }) {
   return (
     <div className="relative">
       <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => setOpen(!open)}
         disabled={loading}
-        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-100 transition hover:bg-red-500/15 focus:outline-none focus:ring-4 focus:ring-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-medium px-3 py-1.5 rounded-lg transition-all flex items-center gap-1"
       >
-        {loading ? <Loader2 size={16} className="animate-spin" /> : <X size={16} />}
+        {loading ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
         Decline
-        <ChevronDown size={14} />
+        <ChevronDown size={10} />
       </button>
 
       {open && (
-        <div
-          role="menu"
-          className="absolute right-0 top-full z-20 mt-2 w-56 rounded-2xl border border-slate-700 bg-slate-900 p-2 shadow-2xl shadow-black/30"
-        >
-          {DECLINE_OPTIONS.map((option) => (
+        <div className="absolute right-0 top-full mt-1 bg-[#1a2435] border border-gray-700/50 rounded-lg shadow-xl z-20 w-48 py-1">
+          {DECLINE_OPTIONS.map(opt => (
             <button
-              key={option.id}
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                onDecline(option.id);
-                setOpen(false);
-              }}
-              className="w-full rounded-xl px-3 py-2 text-left text-sm text-slate-300 transition hover:bg-slate-800 hover:text-white focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
+              key={opt.id}
+              onClick={() => { onDecline(opt.id); setOpen(false); }}
+              className="w-full text-left px-3 py-2 text-xs text-gray-300 hover:bg-gray-700/50 hover:text-white transition-colors"
             >
-              {option.label}
+              {opt.label}
             </button>
           ))}
         </div>
@@ -845,128 +634,135 @@ function DeclineDropdown({ onDecline, loading }) {
   );
 }
 
+
+// ── Override Button Component ────────────────────────
+const URGENCY_OPTIONS = [
+  { id: 'critical', label: 'Critical', icon: '🔴', desc: 'Life-threatening — needs immediate care', color: 'border-red-500/50 hover:bg-red-500/10' },
+  { id: 'high', label: 'High', icon: '🟠', desc: 'Serious but stable condition', color: 'border-amber-500/50 hover:bg-amber-500/10' },
+  { id: 'medium', label: 'Medium', icon: '🟡', desc: 'Needs care but not critical', color: 'border-yellow-500/50 hover:bg-yellow-500/10' },
+];
+
 function OverrideButton({ onOverride, loading, transferCode, bedType, heldUrgency }) {
   const [showModal, setShowModal] = useState(false);
   const [selectedUrgency, setSelectedUrgency] = useState(null);
-  const [step, setStep] = useState('select');
+  const [step, setStep] = useState('select'); // 'select' or 'confirm'
 
-  function handleClose() {
-    setShowModal(false);
-    setSelectedUrgency(null);
-    setStep('select');
+  function handleSelect(urgency) {
+    setSelectedUrgency(urgency);
+    setStep('confirm');
   }
 
   function handleConfirm() {
     onOverride(selectedUrgency);
-    handleClose();
+    setShowModal(false);
+    setStep('select');
+    setSelectedUrgency(null);
+  }
+
+  function handleClose() {
+    setShowModal(false);
+    setStep('select');
+    setSelectedUrgency(null);
   }
 
   return (
     <>
       <button
-        type="button"
         onClick={() => setShowModal(true)}
         disabled={loading}
-        className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-100 transition hover:bg-red-500/15 focus:outline-none focus:ring-4 focus:ring-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-medium px-3 py-1.5 rounded-lg transition-all flex items-center gap-1"
       >
-        {loading ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
+        {loading ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
         Override
       </button>
 
+      {/* Modal backdrop */}
       {showModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          onClick={handleClose}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="override-title"
-        >
-          <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-sm" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={handleClose}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+
+          {/* Modal content */}
           <div
-            className="relative w-full max-w-lg rounded-3xl border border-slate-700 bg-slate-950 shadow-2xl shadow-black/40"
-            onClick={(event) => event.stopPropagation()}
+            className="relative bg-[#0d1320] border border-gray-700/50 rounded-2xl w-full max-w-md shadow-2xl shadow-black/50 overflow-hidden"
+            onClick={e => e.stopPropagation()}
           >
-            <div className="flex items-start justify-between gap-4 border-b border-slate-800 px-5 py-5 sm:px-6">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                  Bed hold override
-                </p>
-                <h3 id="override-title" className="mt-1 text-lg font-semibold text-white">
-                  Release this hold for a walk-in
-                </h3>
-                <p className="mt-1 text-sm text-slate-400">
-                  {transferCode} · {(BED_LABELS[bedType] || bedType || '').toUpperCase()}
-                  {heldUrgency ? ` · current urgency ${heldUrgency}` : ''}
-                </p>
+            {/* Header */}
+            <div className="p-5 pb-3 border-b border-gray-800/50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-white text-sm font-semibold flex items-center gap-2">
+                    <Zap size={14} className="text-red-400" />
+                    Override Bed Hold
+                  </h3>
+                  <p className="text-gray-500 text-xs mt-0.5">
+                    {transferCode} · {(bedType || '').toUpperCase()}
+                    {heldUrgency && <span className="ml-1">· Currently {heldUrgency.toUpperCase()} urgency</span>}
+                  </p>
+                </div>
+                <button onClick={handleClose} className="text-gray-500 hover:text-white p-1 transition-colors">
+                  <X size={16} />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={handleClose}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl text-slate-500 transition hover:bg-slate-900 hover:text-white focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
-              >
-                <X size={18} />
-              </button>
             </div>
 
             {step === 'select' ? (
-              <div className="px-5 py-5 sm:px-6">
-                <p className="text-sm text-slate-400">Choose the urgency level for the walk-in patient.</p>
-                <div className="mt-4 space-y-3">
-                  {URGENCY_OPTIONS.map((option) => (
+              /* Step 1: Select walk-in urgency */
+              <div className="p-5">
+                <p className="text-gray-400 text-xs mb-3">What is the walk-in patient's urgency level?</p>
+                <div className="space-y-2">
+                  {URGENCY_OPTIONS.map(opt => (
                     <button
-                      key={option.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedUrgency(option.id);
-                        setStep('confirm');
-                      }}
-                      className="w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-4 text-left transition hover:border-slate-700 hover:bg-slate-900 focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
+                      key={opt.id}
+                      onClick={() => handleSelect(opt.id)}
+                      className={`w-full text-left p-3 rounded-xl border bg-transparent transition-all ${opt.color}`}
                     >
-                      <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <span className="text-lg">{opt.icon}</span>
                         <div>
-                          <p className="text-base font-semibold text-white">{option.label}</p>
-                          <p className="mt-1 text-sm leading-6 text-slate-400">{option.desc}</p>
+                          <p className="text-white text-sm font-medium">{opt.label}</p>
+                          <p className="text-gray-500 text-xs">{opt.desc}</p>
                         </div>
-                        <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${option.badge}`}>
-                          {option.label}
-                        </span>
                       </div>
                     </button>
                   ))}
                 </div>
               </div>
             ) : (
-              <div className="px-5 py-5 sm:px-6">
-                <div className="rounded-2xl border border-red-500/20 bg-red-500/8 p-4">
-                  <p className="text-sm font-semibold text-red-100">This action cannot be undone</p>
-                  <p className="mt-2 text-sm leading-6 text-slate-300">
-                    The current patient will lose this bed hold and be rerouted to the nearest available hospital automatically.
+              /* Step 2: Confirm override */
+              <div className="p-5">
+                <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-4 mb-4">
+                  <p className="text-red-400 text-xs font-medium mb-2">⚠️ This action cannot be undone</p>
+                  <p className="text-gray-300 text-sm leading-relaxed">
+                    The current patient's bed will be released and they will be
+                    automatically rerouted to the nearest available hospital.
                   </p>
                 </div>
 
-                <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-                  <div className="flex items-center justify-between gap-3 text-sm">
-                    <span className="text-slate-500">Walk-in urgency</span>
-                    <span className="font-medium text-white">{selectedUrgency?.toUpperCase()}</span>
+                <div className="bg-[#151d2e] rounded-lg p-3 mb-4 text-xs">
+                  <div className="flex justify-between text-gray-400 mb-1">
+                    <span>Walk-in urgency</span>
+                    <span className="text-white font-medium">{selectedUrgency?.toUpperCase()}</span>
                   </div>
                   {heldUrgency && (
-                    <div className="mt-2 flex items-center justify-between gap-3 text-sm">
-                      <span className="text-slate-500">Current hold urgency</span>
-                      <span className="font-medium text-white">{heldUrgency.toUpperCase()}</span>
+                    <div className="flex justify-between text-gray-400">
+                      <span>Current hold urgency</span>
+                      <span className="text-white font-medium">{heldUrgency.toUpperCase()}</span>
                     </div>
                   )}
                 </div>
 
-                <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <button type="button" onClick={() => setStep('select')} className={secondaryButtonClass}>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setStep('select')}
+                    className="flex-1 bg-[#151d2e] hover:bg-[#1a2435] text-gray-300 text-sm font-medium py-2.5 rounded-lg transition-all"
+                  >
                     Back
                   </button>
                   <button
-                    type="button"
                     onClick={handleConfirm}
-                    className={`${primaryButtonClass} bg-red-500 text-white hover:bg-red-400`}
+                    className="flex-1 bg-red-500 hover:bg-red-600 text-white text-sm font-medium py-2.5 rounded-lg transition-all"
                   >
-                    Confirm override
+                    Confirm Override
                   </button>
                 </div>
               </div>
@@ -975,5 +771,65 @@ function OverrideButton({ onOverride, loading, transferCode, bedType, heldUrgenc
         </div>
       )}
     </>
+  );
+}
+
+
+// ── Patient ETA Component ────────────────────────────
+function PatientETA({ patientLat, patientLng, hospitalLat, hospitalLng, positionAt }) {
+  const [eta, setEta] = useState(null);
+  const [distance, setDistance] = useState(null);
+  const fetchedRef = useRef(null);
+
+  useEffect(() => {
+    // Fetch route ETA from Mapbox — only when position changes significantly
+    const key = `${patientLat.toFixed(4)},${patientLng.toFixed(4)}`;
+    if (fetchedRef.current === key) return;
+    fetchedRef.current = key;
+
+    const token = import.meta.env.VITE_MAPBOX_TOKEN;
+    if (!token) return;
+
+    fetch(
+      `https://api.mapbox.com/directions/v5/mapbox/driving/` +
+      `${patientLng},${patientLat};${hospitalLng},${hospitalLat}` +
+      `?overview=false&access_token=${token}`
+    )
+      .then(r => r.json())
+      .then(data => {
+        if (data.routes?.[0]) {
+          setEta(Math.round(data.routes[0].duration / 60));
+          setDistance((data.routes[0].distance / 1000).toFixed(1));
+        }
+      })
+      .catch(() => {});
+  }, [patientLat, patientLng]);
+
+  // How fresh is the position?
+  const freshness = positionAt
+    ? Math.round((new Date() - new Date(positionAt)) / 1000)
+    : null;
+  const isStale = freshness && freshness > 60;
+
+  if (!eta) return null;
+
+  return (
+    <div className="flex items-center gap-2 mt-1">
+      <div className="flex items-center gap-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg px-2 py-1">
+        <div
+          className="rounded-full"
+          style={{
+            width: 6, height: 6,
+            backgroundColor: isStale ? '#6b7280' : '#3b82f6',
+            boxShadow: isStale ? 'none' : '0 0 4px rgba(59,130,246,0.5)',
+          }}
+        />
+        <span className="text-blue-400 text-xs font-bold">{eta} min</span>
+        <span className="text-gray-500 text-[10px]">{distance} km away</span>
+      </div>
+      {isStale && (
+        <span className="text-gray-600 text-[9px]">GPS {freshness}s ago</span>
+      )}
+    </div>
   );
 }

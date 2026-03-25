@@ -1,23 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
+/**
+ * SearchPanel — left sidebar with full emergency booking flow.
+ *
+ * Steps:
+ *   1. Search (Smart Triage or Nearby)
+ *   2. Results list (pick a hospital)
+ *   3. Patient details (name, phone, condition)
+ *   4. Live status tracker (polling handshake until resolved)
+ */
+
+import { useState, useRef, useEffect } from 'react';
 import {
-  AlertTriangle,
-  ArrowLeft,
-  Brain,
-  Check,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  Clock,
-  Copy,
-  FileText,
-  Loader2,
-  MapPin,
-  Navigation,
-  Phone,
-  Search,
-  User,
-  X,
-  XCircle,
+  Search, Brain, MapPin, ChevronLeft, ChevronRight, X,
+  Loader2, AlertTriangle, ArrowLeft, Phone, User, FileText,
+  CheckCircle2, Clock, XCircle, Navigation, Copy, Check
 } from 'lucide-react';
 import api from '../../lib/api';
 import useHandshake from '../../hooks/useHandshake';
@@ -30,27 +25,7 @@ const STEPS = {
   TRACKING: 'tracking',
 };
 
-const FALLBACK_LOCATION = { lat: 6.5244, lng: 3.3792 };
-
-const shellClass =
-  'relative z-20 flex h-full w-full max-w-full flex-col border-r border-slate-800/80 bg-slate-950/95 text-slate-100 backdrop-blur md:w-[400px] md:max-w-[400px]';
-const surfaceClass =
-  'rounded-2xl border border-slate-800 bg-slate-900/80 shadow-[0_1px_2px_rgba(15,23,42,0.3)]';
-const subtleSurfaceClass = 'rounded-2xl border border-slate-800/80 bg-slate-900/50';
-const inputClass =
-  'w-full rounded-xl border border-slate-700 bg-slate-950/50 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-500/10';
-const primaryButtonClass =
-  'inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-cyan-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 active:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500 focus:outline-none focus:ring-4 focus:ring-cyan-500/20';
-const secondaryButtonClass =
-  'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 active:bg-slate-800 focus:outline-none focus:ring-4 focus:ring-slate-500/20';
-
-export default function SearchPanel({
-  onResults,
-  onClear,
-  searchResults,
-  hospitals,
-  onHospitalSelect,
-}) {
+export default function SearchPanel({ onResults, onClear, searchResults, hospitals, onHospitalSelect, onStartTracking }) {
   const [collapsed, setCollapsed] = useState(false);
   const [step, setStep] = useState(STEPS.SEARCH);
   const [mode, setMode] = useState('triage');
@@ -60,6 +35,7 @@ export default function SearchPanel({
   const [error, setError] = useState(null);
   const [clinicResults, setClinicResults] = useState(null);
 
+  // Booking state
   const [selectedResult, setSelectedResult] = useState(null);
   const [patientName, setPatientName] = useState('');
   const [patientPhone, setPatientPhone] = useState('');
@@ -70,15 +46,26 @@ export default function SearchPanel({
   const [rerouteResults, setRerouteResults] = useState(null);
   const [rerouteLoading, setRerouteLoading] = useState(false);
 
+  // Live status polling
   const { handshake, loading: handshakeLoading, countdown } = useHandshake(handshakeId);
-  const prevStatus = useRef(null);
 
+  // Auto-search for alternatives when overridden
+  const prevStatus = useRef(null);
   useEffect(() => {
     if (handshake?.status === 'overridden' && prevStatus.current !== 'overridden') {
+      // Status just changed to overridden — auto-search for alternatives
       (async () => {
         setRerouteLoading(true);
         try {
-          const { lat, lng } = await getUserCoordinates();
+          let lat = 6.5244, lng = 3.3792;
+          try {
+            const pos = await new Promise((resolve, reject) =>
+              navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 })
+            );
+            lat = pos.coords.latitude;
+            lng = pos.coords.longitude;
+          } catch (_) {}
+
           const res = await api.post('/api/search/nearby', {
             latitude: lat,
             longitude: lng,
@@ -86,8 +73,9 @@ export default function SearchPanel({
             limit: 5,
           });
 
+          // Filter out the hospital that overrode
           const filtered = res.data.results.filter(
-            (result) => result.hospital_id !== selectedResult?.hospital_id
+            r => r.hospital_id !== selectedResult?.hospital_id
           );
           setRerouteResults(filtered);
         } catch (err) {
@@ -97,12 +85,58 @@ export default function SearchPanel({
         }
       })();
     }
-
     prevStatus.current = handshake?.status;
-  }, [handshake?.status, selectedResult?.hospital_id]);
+  }, [handshake?.status]);
 
-  async function handleTriageSearch(event) {
-    event.preventDefault();
+  // Start map tracking when bed is confirmed
+  const positionIntervalRef = useRef(null);
+  useEffect(() => {
+    if (handshake?.status === 'accepted' && selectedResult && onStartTracking) {
+      const hospital = hospitals.find(h => h.id === selectedResult.hospital_id);
+      if (hospital) {
+        onStartTracking({
+          lat: hospital.lat,
+          lng: hospital.lng,
+          name: hospital.name || selectedResult.name,
+          address: hospital.address || selectedResult.address,
+        });
+      }
+
+      // Report position to backend every 10 seconds so hospital dashboard can show ETA
+      if (handshakeId) {
+        function reportPosition() {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              api.patch(`/api/handshakes/${handshakeId}/position`, {
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+              }).catch(() => {}); // silent fail
+            },
+            () => {},
+            { enableHighAccuracy: false, timeout: 5000 }
+          );
+        }
+        reportPosition(); // immediate first report
+        positionIntervalRef.current = setInterval(reportPosition, 10000);
+      }
+    }
+
+    // Cleanup when status changes away from accepted
+    if (handshake?.status && handshake.status !== 'accepted' && positionIntervalRef.current) {
+      clearInterval(positionIntervalRef.current);
+      positionIntervalRef.current = null;
+    }
+
+    return () => {
+      if (positionIntervalRef.current) {
+        clearInterval(positionIntervalRef.current);
+      }
+    };
+  }, [handshake?.status === 'accepted']);
+
+  // ── Search handlers ────────────────────────────────────
+  async function handleTriageSearch(e) {
+    e.preventDefault();
     if (!description.trim()) return;
 
     setLoading(true);
@@ -110,7 +144,15 @@ export default function SearchPanel({
     setTriageAnalysis(null);
 
     try {
-      const { lat, lng } = await getUserCoordinates();
+      let lat = 6.5244, lng = 3.3792; // Lagos fallback
+      try {
+        const pos = await new Promise((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 })
+        );
+        lat = pos.coords.latitude;
+        lng = pos.coords.longitude;
+      } catch (_) {}
+
       const res = await api.post('/api/search/triage', {
         description: description.trim(),
         latitude: lat,
@@ -118,22 +160,25 @@ export default function SearchPanel({
         radius_km: 20,
       });
 
-      const analysis = res.data.parsed_requirements;
-      setTriageAnalysis(analysis);
+      setTriageAnalysis(res.data.parsed_requirements);
 
-      if (analysis?.urgency === 'low') {
-        const clinics = hospitals.filter(
-          (hospital) =>
-            hospital.beds?.length === 0 ||
-            ['clinic', 'pharmacy'].includes(hospital.hospital_type)
+      // Check urgency level for gating
+      const urgency = res.data.parsed_requirements?.urgency;
+      if (urgency === 'low') {
+        // Low urgency — show clinic redirect view
+        // Search for clinics from the hospital list
+        const clinics = hospitals.filter(h =>
+          h.beds?.length === 0 ||
+          ['clinic', 'pharmacy'].includes(h.hospital_type)
         );
-        setClinicResults(clinics.length > 0 ? clinics : hospitals.slice(-5));
+        // If no clinics in data, filter hospitals by smallest size
+        const clinicLike = clinics.length > 0 ? clinics : hospitals.slice(-5);
+        setClinicResults(clinicLike);
         setStep(STEPS.LOW_URGENCY);
-        return;
+      } else {
+        onResults(res.data.results);
+        setStep(STEPS.RESULTS);
       }
-
-      onResults(res.data.results);
-      setStep(STEPS.RESULTS);
     } catch (err) {
       setError('Search failed. Please try again.');
     } finally {
@@ -146,7 +191,15 @@ export default function SearchPanel({
     setError(null);
 
     try {
-      const { lat, lng } = await getUserCoordinates();
+      let lat = 6.5244, lng = 3.3792;
+      try {
+        const pos = await new Promise((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 })
+        );
+        lat = pos.coords.latitude;
+        lng = pos.coords.longitude;
+      } catch (_) {}
+
       const res = await api.post('/api/search/nearby', {
         latitude: lat,
         longitude: lng,
@@ -163,33 +216,61 @@ export default function SearchPanel({
     }
   }
 
+  // ── Hospital selection ─────────────────────────────────
   function handleSelectHospital(result) {
     setSelectedResult(result);
-    const hospital = hospitals.find((item) => item.id === result.hospital_id);
+    const hospital = hospitals.find((h) => h.id === result.hospital_id);
     if (hospital) onHospitalSelect(hospital);
+    // Pre-fill condition from triage description
     if (description && !patientCondition) {
       setPatientCondition(description);
     }
     setStep(STEPS.PATIENT);
   }
 
-  async function handleBookBed(event) {
-    event.preventDefault();
+  // ── Create handshake ───────────────────────────────────
+  async function handleBookBed(e) {
+    e.preventDefault();
     if (!selectedResult || !patientPhone.trim()) return;
 
     setLoading(true);
     setError(null);
 
     try {
+      // Get patient's current location for drive time calculation
+      let holdMin = 45; // default fallback
+      try {
+        const pos = await new Promise((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 })
+        );
+        const pLat = pos.coords.latitude;
+        const pLng = pos.coords.longitude;
+
+        // Find hospital coordinates
+        const hospital = hospitals.find(h => h.id === selectedResult.hospital_id);
+        if (hospital) {
+          const token = import.meta.env.VITE_MAPBOX_TOKEN;
+          const routeRes = await fetch(
+            `https://api.mapbox.com/directions/v5/mapbox/driving/${pLng},${pLat};${hospital.lng},${hospital.lat}?access_token=${token}`
+          );
+          const routeData = await routeRes.json();
+          if (routeData.routes?.[0]?.duration) {
+            const driveMin = Math.round(routeData.routes[0].duration / 60);
+            holdMin = driveMin + 15; // drive time + 15 min buffer
+            holdMin = Math.max(20, Math.min(holdMin, 180));
+          }
+        }
+      } catch (_) {
+        // GPS or Mapbox failed — use default 45 min
+      }
+
       const res = await api.post('/api/handshakes', {
         receiving_hospital_id: selectedResult.hospital_id,
         bed_type: Object.keys(selectedResult.beds || {})[0] || 'emergency',
         requesting_party_type: 'individual',
         requesting_party_phone: patientPhone.trim(),
-        patient_summary: `${patientName ? `${patientName}. ` : ''}${
-          patientCondition || description || 'Emergency'
-        }`.trim(),
-        hold_duration_min: 45,
+        patient_summary: `${patientName ? patientName + '. ' : ''}${patientCondition || description || 'Emergency'}`.trim(),
+        hold_duration_min: holdMin,
         parsed_requirements: triageAnalysis || undefined,
       });
 
@@ -203,31 +284,7 @@ export default function SearchPanel({
     }
   }
 
-  async function handleOverrideToHospitals() {
-    setLoading(true);
-    setError(null);
-
-    if (triageAnalysis) {
-      setTriageAnalysis({ ...triageAnalysis, urgency: 'medium' });
-    }
-
-    try {
-      const { lat, lng } = await getUserCoordinates();
-      const res = await api.post('/api/search/triage', {
-        description: description.trim(),
-        latitude: lat,
-        longitude: lng,
-        radius_km: 20,
-      });
-      onResults(res.data.results);
-      setStep(STEPS.RESULTS);
-    } catch (err) {
-      setError('Search failed.');
-    } finally {
-      setLoading(false);
-    }
-  }
-
+  // ── Reset everything ───────────────────────────────────
   function handleReset() {
     setStep(STEPS.SEARCH);
     setDescription('');
@@ -247,1053 +304,820 @@ export default function SearchPanel({
   }
 
   function copyCode() {
-    if (!transferCode) return;
-
-    navigator.clipboard.writeText(transferCode);
-    setCodeCopied(true);
-    setTimeout(() => setCodeCopied(false), 2000);
+    if (transferCode) {
+      navigator.clipboard.writeText(transferCode);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
+    }
   }
 
+  // ── Collapsed state ────────────────────────────────────
   if (collapsed) {
     return (
       <button
-        type="button"
         onClick={() => setCollapsed(false)}
-        aria-label="Expand search panel"
-        className="absolute left-4 top-4 z-30 inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-700 bg-slate-950/90 text-slate-200 shadow-lg transition hover:bg-slate-900 focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
+        className="absolute top-5 left-5 z-30 bg-[#0d1320]/90 backdrop-blur-sm border border-gray-700/50 text-gray-300 p-2.5 rounded-xl hover:bg-[#151d2e] transition-colors"
       >
         <ChevronRight size={18} />
       </button>
     );
   }
 
-  const header = getStepCopy(step, searchResults, selectedResult, transferCode);
-
   return (
-    <aside className={shellClass} aria-label="Emergency search panel">
-      <header className="border-b border-slate-800/80 px-4 py-4 sm:px-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0 space-y-1">
-            <div className="flex items-center gap-2">
-              {step !== STEPS.SEARCH && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (step === STEPS.RESULTS) {
-                      setStep(STEPS.SEARCH);
-                      onClear();
-                    } else if (step === STEPS.LOW_URGENCY) {
-                      setStep(STEPS.SEARCH);
-                    } else if (step === STEPS.PATIENT) {
-                      setStep(STEPS.RESULTS);
-                    }
-                  }}
-                  aria-label="Go back"
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 text-slate-300 transition hover:border-slate-600 hover:bg-slate-800 hover:text-white focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
-                >
-                  <ArrowLeft size={16} />
-                </button>
-              )}
-              <div>
-                <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                  Emergency routing
-                </p>
-                <h2 className="text-lg font-semibold tracking-tight text-white">{header.title}</h2>
+    <div className="w-[380px] h-full bg-[#0a0f1a] border-r border-gray-800/50 flex flex-col z-20 relative">
+
+      {/* ── Header ──────────────────────────────────────── */}
+      <div className="p-5 pb-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          {step !== STEPS.SEARCH && (
+            <button
+              onClick={() => {
+                if (step === STEPS.RESULTS) { setStep(STEPS.SEARCH); onClear(); }
+                else if (step === STEPS.LOW_URGENCY) { setStep(STEPS.SEARCH); }
+                else if (step === STEPS.PATIENT) setStep(STEPS.RESULTS);
+                else if (step === STEPS.TRACKING) {} // Can't go back from tracking
+              }}
+              className="text-gray-400 hover:text-white p-1 transition-colors"
+            >
+              <ArrowLeft size={16} />
+            </button>
+          )}
+          <div>
+            <h2 className="text-white text-base font-semibold">
+              {step === STEPS.SEARCH && 'Find a hospital'}
+              {step === STEPS.RESULTS && 'Choose a hospital'}
+              {step === STEPS.LOW_URGENCY && 'Non-emergency care'}
+              {step === STEPS.PATIENT && 'Patient details'}
+              {step === STEPS.TRACKING && 'Bed reservation'}
+            </h2>
+            <p className="text-gray-500 text-xs mt-0.5">
+              {step === STEPS.SEARCH && 'Describe your emergency or search nearby'}
+              {step === STEPS.RESULTS && `${searchResults?.length || 0} hospitals found`}
+              {step === STEPS.LOW_URGENCY && 'We recommend a clinic for your situation'}
+              {step === STEPS.PATIENT && selectedResult?.name}
+              {step === STEPS.TRACKING && (transferCode ? `Code: ${transferCode}` : 'Creating reservation...')}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={() => setCollapsed(true)}
+          className="text-gray-500 hover:text-gray-300 p-1 transition-colors"
+        >
+          <ChevronLeft size={18} />
+        </button>
+      </div>
+
+      {/* ── Step indicator ──────────────────────────────── */}
+      <div className="px-5 pb-4">
+        <div className="flex gap-1">
+          {(step === STEPS.LOW_URGENCY
+            ? ['Search', 'Assessment', 'Clinics']
+            : ['Search', 'Select', 'Details', 'Track']
+          ).map((label, i) => {
+            const stepOrder = step === STEPS.LOW_URGENCY
+              ? [STEPS.SEARCH, STEPS.LOW_URGENCY, STEPS.LOW_URGENCY]
+              : [STEPS.SEARCH, STEPS.RESULTS, STEPS.PATIENT, STEPS.TRACKING];
+            const currentIdx = stepOrder.indexOf(step);
+            const isActive = i <= currentIdx;
+            const isLow = step === STEPS.LOW_URGENCY;
+            return (
+              <div key={label} className="flex-1">
+                <div className={`h-1 rounded-full transition-all duration-500 ${
+                  isActive ? (isLow ? 'bg-amber-500' : 'bg-cyan-500') : 'bg-gray-800'
+                }`} />
+                <p className={`text-[9px] mt-1 ${
+                  isActive ? (isLow ? 'text-amber-400' : 'text-cyan-400') : 'text-gray-700'
+                }`}>{label}</p>
               </div>
-            </div>
-            <p className="max-w-[32ch] text-sm leading-5 text-slate-400">{header.description}</p>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Error ───────────────────────────────────────── */}
+      {error && (
+        <div className="mx-5 mb-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs px-3 py-2 rounded-lg flex items-center gap-2">
+          <AlertTriangle size={12} />
+          {error}
+          <button onClick={() => setError(null)} className="ml-auto"><X size={12} /></button>
+        </div>
+      )}
+
+      {/* ── STEP 1: Search ──────────────────────────────── */}
+      {step === STEPS.SEARCH && (
+        <div className="px-5 flex-1">
+          {/* Mode toggle */}
+          <div className="flex gap-1 bg-[#151d2e] rounded-lg p-1 mb-4">
+            <button
+              onClick={() => setMode('triage')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-all ${
+                mode === 'triage'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              <Brain size={13} />
+              Smart Triage
+            </button>
+            <button
+              onClick={() => setMode('quick')}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-medium transition-all ${
+                mode === 'quick'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              <MapPin size={13} />
+              Nearby
+            </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setCollapsed(true)}
-            aria-label="Collapse search panel"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-900 hover:text-slate-200 focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
-          >
-            <ChevronLeft size={18} />
-          </button>
-        </div>
-
-        <nav aria-label="Progress" className="mt-4">
-          <ol className="flex items-center gap-2">
-            {getProgressItems(step).map((item, index, items) => (
-              <li key={item.label} className="flex min-w-0 flex-1 items-center gap-2">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${
-                      item.state === 'complete'
-                        ? 'bg-cyan-500 text-slate-950'
-                        : item.state === 'current'
-                          ? 'border border-cyan-400/50 bg-cyan-500/10 text-cyan-300'
-                          : 'border border-slate-700 bg-slate-900 text-slate-500'
-                    }`}
-                    aria-hidden="true"
-                  >
-                    {index + 1}
-                  </span>
-                  <span
-                    className={`truncate text-xs font-medium ${
-                      item.state === 'pending' ? 'text-slate-500' : 'text-slate-300'
-                    }`}
-                  >
-                    {item.label}
-                  </span>
-                </div>
-                {index < items.length - 1 && (
-                  <span
-                    aria-hidden="true"
-                    className={`h-px flex-1 ${
-                      item.state === 'complete' ? 'bg-cyan-500/50' : 'bg-slate-800'
-                    }`}
-                  />
+          {mode === 'triage' ? (
+            <form onSubmit={handleTriageSearch}>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder={"Describe the emergency...\ne.g. 'My father collapsed, he's diabetic, bleeding from his head'"}
+                rows={3}
+                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 transition-all"
+              />
+              <button
+                type="submit"
+                disabled={loading || !description.trim()}
+                className="w-full mt-2 bg-cyan-500 hover:bg-cyan-400 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium py-2.5 rounded-lg transition-all flex items-center justify-center gap-2"
+              >
+                {loading ? (
+                  <><Loader2 size={14} className="animate-spin" /> Analyzing...</>
+                ) : (
+                  <><Brain size={14} /> Find best hospital</>
                 )}
-              </li>
-            ))}
-          </ol>
-        </nav>
-      </header>
+              </button>
+            </form>
+          ) : (
+            <button
+              onClick={handleQuickSearch}
+              disabled={loading}
+              className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <><Loader2 size={14} className="animate-spin" /> Searching...</>
+              ) : (
+                <><MapPin size={14} /> Find hospitals near me</>
+              )}
+            </button>
+          )}
+        </div>
+      )}
 
-      {error && (
-        <div
-          role="alert"
-          aria-live="polite"
-          className="mx-4 mt-4 flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200 sm:mx-6"
-        >
-          <AlertTriangle size={16} className="mt-0.5 flex-shrink-0 text-red-300" />
-          <p className="flex-1">{error}</p>
+      {/* ── STEP 2: Results ─────────────────────────────── */}
+      {step === STEPS.RESULTS && (
+        <div className="flex-1 overflow-y-auto px-5">
+          {/* Triage analysis card */}
+          {triageAnalysis && (
+            <div className="mb-3 bg-cyan-500/5 border border-cyan-500/20 rounded-lg p-3">
+              <p className="text-cyan-300 text-xs font-medium mb-1.5 flex items-center gap-1.5">
+                <Brain size={12} /> AI Analysis
+              </p>
+              <p className="text-white text-sm font-medium">
+                {triageAnalysis.condition_category?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+              </p>
+              <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                  triageAnalysis.urgency === 'critical' ? 'bg-red-500/20 text-red-400' :
+                  triageAnalysis.urgency === 'high' ? 'bg-amber-500/20 text-amber-400' :
+                  'bg-green-500/20 text-green-400'
+                }`}>
+                  {triageAnalysis.urgency}
+                </span>
+                {triageAnalysis.required_equipment?.slice(0, 3).map((eq) => (
+                  <span key={eq} className="text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
+                    {eq.replace(/_/g, ' ')}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Medium urgency advisory */}
+          {triageAnalysis?.urgency === 'medium' && (
+            <div className="mb-3 bg-amber-500/5 border border-amber-500/20 rounded-lg p-2.5">
+              <p className="text-amber-400 text-xs flex items-center gap-1.5">
+                <AlertTriangle size={11} />
+                Consider visiting a clinic if this is not urgent.
+              </p>
+            </div>
+          )}
+
+          {/* Result cards */}
+          {searchResults?.map((result, idx) => {
+            const beds = result.beds || {};
+            return (
+              <button
+                key={result.hospital_id}
+                onClick={() => handleSelectHospital(result)}
+                className="w-full text-left mb-2 bg-[#151d2e] hover:bg-[#1a2435] border border-gray-800/50 hover:border-cyan-500/30 rounded-xl p-3.5 transition-all group"
+              >
+                <div className="flex items-start gap-3">
+                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+                    idx === 0 ? 'bg-cyan-500 text-white' : 'bg-gray-700 text-gray-300'
+                  }`}>
+                    {idx + 1}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <h4 className="text-white text-sm font-medium truncate group-hover:text-cyan-300 transition-colors">
+                        {result.name}
+                      </h4>
+                      <span className="text-gray-500 text-xs flex-shrink-0">{result.distance_km}km</span>
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5">
+                      {Object.entries(beds).map(([type, data]) => (
+                        <span key={type} className="text-[11px]">
+                          <span className="text-gray-500">{type.toUpperCase()}: </span>
+                          <span className={data.available > 0 ? 'text-emerald-400' : data.overflow > 0 ? 'text-amber-400' : 'text-red-400'}>
+                            {data.available > 0 ? data.available : data.overflow > 0 ? `${data.overflow} ovf` : '0'}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2 mt-1.5">
+                      {result.trust_tier === 'verified' && <span className="text-[10px] text-emerald-400">✓ Verified</span>}
+                      {result.trust_tier === 'unverified' && <span className="text-[10px] text-amber-400">⚠ Unverified</span>}
+                      {result.freshness_hours != null && (
+                        <span className="text-[10px] text-gray-600">
+                          {result.freshness_hours < 1 ? `${Math.round(result.freshness_hours * 60)}min ago` : `${Math.round(result.freshness_hours)}h ago`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+
+          {searchResults?.length === 0 && (
+            <div className="text-center py-8">
+              <p className="text-gray-500 text-sm">No hospitals found nearby</p>
+              <p className="text-gray-600 text-xs mt-1">Try expanding your search area</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── STEP 2b: Low Urgency — Clinic Redirect ──────── */}
+      {step === STEPS.LOW_URGENCY && (
+        <div className="flex-1 overflow-y-auto px-5">
+          {/* Triage analysis */}
+          {triageAnalysis && (
+            <div className="mb-3 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">
+              <p className="text-amber-300 text-xs font-medium mb-1.5 flex items-center gap-1.5">
+                <Brain size={12} /> AI Analysis
+              </p>
+              <p className="text-white text-sm font-medium">
+                {triageAnalysis.condition_category?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+              </p>
+              <div className="flex items-center gap-2 mt-1.5">
+                <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">
+                  {triageAnalysis.urgency}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Advisory */}
+          <div className="mb-4 bg-[#151d2e] border border-gray-800/50 rounded-xl p-4">
+            <p className="text-amber-400 text-xs font-medium mb-2">⚠️ Non-emergency assessment</p>
+            <p className="text-gray-300 text-sm leading-relaxed">
+              Based on your description, this may not require emergency hospital care.
+              We recommend visiting a nearby clinic or pharmacy.
+            </p>
+
+            {/* Self-care advice */}
+            {triageAnalysis?.self_care_advice?.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-gray-700/50">
+                <p className="text-gray-400 text-xs font-medium mb-1.5">💊 Self-care suggestions</p>
+                <ul className="space-y-1">
+                  {triageAnalysis.self_care_advice.map((tip, i) => (
+                    <li key={i} className="text-gray-400 text-xs flex items-start gap-1.5">
+                      <span className="text-gray-600 mt-0.5">•</span>
+                      {tip}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-gray-600 text-[10px] mt-2 italic">
+                  If symptoms worsen, seek medical attention immediately.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Clinic results */}
+          {clinicResults && clinicResults.length > 0 && (
+            <>
+              <p className="text-gray-400 text-xs mb-2">Nearby clinics & pharmacies</p>
+              {clinicResults.map((clinic) => (
+                <div
+                  key={clinic.id}
+                  className="mb-2 bg-[#151d2e] border border-gray-800/50 rounded-xl p-3.5"
+                >
+                  <h4 className="text-white text-sm font-medium">{clinic.name}</h4>
+                  {clinic.address && (
+                    <p className="text-gray-500 text-xs mt-1">📍 {clinic.address}</p>
+                  )}
+                  <div className="flex gap-2 mt-2">
+                    {clinic.phone && (
+                      <a
+                        href={`tel:${clinic.phone}`}
+                        className="flex-1 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 text-xs font-medium py-2 rounded-lg transition-all text-center"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        📞 Call
+                      </a>
+                    )}
+                    <a
+                      href={`https://maps.google.com/maps?daddr=${encodeURIComponent(clinic.address || clinic.name + ' Lagos')}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-medium py-2 rounded-lg transition-all text-center"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      🗺 Directions
+                    </a>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* Override button */}
           <button
-            type="button"
-            onClick={() => setError(null)}
-            aria-label="Dismiss error"
-            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-red-200 transition hover:bg-red-500/10 focus:outline-none focus:ring-4 focus:ring-red-500/20"
+            onClick={() => {
+              // Re-run triage search but force medium urgency
+              if (triageAnalysis) {
+                triageAnalysis.urgency = 'medium';
+                setTriageAnalysis({ ...triageAnalysis });
+              }
+              // Re-trigger search — use the existing triage results but go to normal results
+              setLoading(true);
+              (async () => {
+                try {
+                  let lat = 6.5244, lng = 3.3792;
+                  try {
+                    const pos = await new Promise((resolve, reject) =>
+                      navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 })
+                    );
+                    lat = pos.coords.latitude;
+                    lng = pos.coords.longitude;
+                  } catch (_) {}
+
+                  const res = await api.post('/api/search/triage', {
+                    description: description.trim(),
+                    latitude: lat,
+                    longitude: lng,
+                    radius_km: 20,
+                  });
+                  onResults(res.data.results);
+                  setStep(STEPS.RESULTS);
+                } catch (err) {
+                  setError('Search failed.');
+                } finally {
+                  setLoading(false);
+                }
+              })();
+            }}
+            className="w-full mt-3 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-medium py-2.5 rounded-lg transition-all flex items-center justify-center gap-1.5"
           >
-            <X size={14} />
+            <AlertTriangle size={12} />
+            I still need a hospital
           </button>
         </div>
       )}
 
-      <main className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-        {step === STEPS.SEARCH && (
-          <section className="space-y-4" aria-labelledby="search-panel-heading">
-            <div className={`${surfaceClass} p-4 sm:p-5`}>
-              <div className="mb-4 flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <h3 id="search-panel-heading" className="text-base font-semibold text-white">
-                    Start with the fastest path
-                  </h3>
-                  <p className="text-sm leading-6 text-slate-400">
-                    Use triage when you need the best-fit facility, or search nearby for the
-                    quickest list.
-                  </p>
-                </div>
+      {/* ── STEP 3: Patient Details ─────────────────────── */}
+      {step === STEPS.PATIENT && (
+        <div className="px-5 flex-1">
+          {/* Selected hospital summary */}
+          {selectedResult && (
+            <div className="bg-[#151d2e] rounded-lg p-3 mb-4 border border-gray-800/50">
+              <div className="flex items-center justify-between">
+                <h4 className="text-white text-sm font-medium">{selectedResult.name}</h4>
+                <span className="text-gray-500 text-xs">{selectedResult.distance_km}km</span>
               </div>
-
-              <div
-                className="grid grid-cols-2 gap-2 rounded-2xl bg-slate-950/60 p-1"
-                role="tablist"
-                aria-label="Search mode"
-              >
-                <ModeButton
-                  active={mode === 'triage'}
-                  icon={<Brain size={14} />}
-                  label="Smart triage"
-                  description="Best match"
-                  onClick={() => setMode('triage')}
-                />
-                <ModeButton
-                  active={mode === 'quick'}
-                  icon={<MapPin size={14} />}
-                  label="Nearby"
-                  description="Fastest list"
-                  onClick={() => setMode('quick')}
-                />
-              </div>
-
-              {mode === 'triage' ? (
-                <form onSubmit={handleTriageSearch} className="mt-4 space-y-4">
-                  <div className="space-y-2">
-                    <label
-                      htmlFor="emergency-description"
-                      className="text-sm font-medium text-slate-300"
-                    >
-                      Describe what is happening
-                    </label>
-                    <textarea
-                      id="emergency-description"
-                      value={description}
-                      onChange={(event) => setDescription(event.target.value)}
-                      placeholder="My father collapsed, he's diabetic, and he has a head injury."
-                      rows={5}
-                      className={`${inputClass} resize-none leading-6`}
-                    />
-                    <p className="text-xs leading-5 text-slate-500">
-                      Include age, symptoms, injuries, or anything the hospital should know.
-                    </p>
-                  </div>
-
-                  <button type="submit" disabled={loading || !description.trim()} className={primaryButtonClass}>
-                    {loading ? (
-                      <>
-                        <Loader2 size={16} className="animate-spin" />
-                        Analyzing need
-                      </>
-                    ) : (
-                      <>
-                        <Brain size={16} />
-                        Find best hospital
-                      </>
-                    )}
-                  </button>
-                </form>
-              ) : (
-                <div className="mt-4 space-y-4">
-                  <div className={`${subtleSurfaceClass} p-4`}>
-                    <p className="text-sm leading-6 text-slate-400">
-                      We’ll use your current location to show nearby hospitals with available
-                      capacity.
-                    </p>
-                  </div>
-                  <button type="button" onClick={handleQuickSearch} disabled={loading} className={primaryButtonClass}>
-                    {loading ? (
-                      <>
-                        <Loader2 size={16} className="animate-spin" />
-                        Searching nearby
-                      </>
-                    ) : (
-                      <>
-                        <Search size={16} />
-                        Find hospitals near me
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
+              <p className="text-gray-500 text-xs mt-1">{selectedResult.address}</p>
             </div>
-          </section>
-        )}
+          )}
 
-        {step === STEPS.RESULTS && (
-          <section className="space-y-4" aria-labelledby="results-heading">
-            {triageAnalysis && (
-              <AnalysisCard triageAnalysis={triageAnalysis} tone="cyan" title="Triage summary" />
-            )}
-
-            {triageAnalysis?.urgency === 'medium' && (
-              <div className="rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle size={16} className="mt-0.5 flex-shrink-0 text-amber-300" />
-                  <p>Consider a clinic if the situation is stable and symptoms are not worsening.</p>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-3">
-              <div className="flex items-end justify-between gap-3">
-                <div>
-                  <h3 id="results-heading" className="text-base font-semibold text-white">
-                    Recommended hospitals
-                  </h3>
-                  <p className="text-sm text-slate-400">
-                    Sorted by fit, distance, and current availability.
-                  </p>
-                </div>
-                <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">
-                  {searchResults?.length || 0} results
-                </p>
-              </div>
-
-              {searchResults?.length ? (
-                <ul className="space-y-3" aria-label="Hospital results">
-                  {searchResults.map((result, index) => (
-                    <li key={result.hospital_id}>
-                      <ResultCard result={result} index={index} onSelect={handleSelectHospital} />
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <EmptyState
-                  title="No hospitals found nearby"
-                  description="Try expanding your search area or use a different description."
-                />
-              )}
-            </div>
-          </section>
-        )}
-
-        {step === STEPS.LOW_URGENCY && (
-          <section className="space-y-4" aria-labelledby="clinic-heading">
-            {triageAnalysis && (
-              <AnalysisCard triageAnalysis={triageAnalysis} tone="amber" title="Assessment summary" />
-            )}
-
-            <div className={`${surfaceClass} p-4 sm:p-5`}>
-              <div className="flex items-start gap-3">
-                <AlertTriangle size={18} className="mt-0.5 flex-shrink-0 text-amber-300" />
-                <div className="space-y-2">
-                  <h3 id="clinic-heading" className="text-base font-semibold text-white">
-                    Non-emergency care is likely appropriate
-                  </h3>
-                  <p className="text-sm leading-6 text-slate-400">
-                    Based on the description, a clinic or pharmacy may be a better next step than
-                    an emergency department.
-                  </p>
-                </div>
-              </div>
-
-              {triageAnalysis?.self_care_advice?.length > 0 && (
-                <div className="mt-4 border-t border-slate-800 pt-4">
-                  <p className="text-sm font-medium text-slate-300">Self-care suggestions</p>
-                  <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-400">
-                    {triageAnalysis.self_care_advice.map((tip, index) => (
-                      <li key={index} className="flex items-start gap-2">
-                        <span className="mt-2 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-slate-500" />
-                        <span>{tip}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  <p className="mt-3 text-xs leading-5 text-slate-500">
-                    Seek urgent care immediately if symptoms worsen or new severe symptoms appear.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {clinicResults?.length ? (
-              <div className="space-y-3">
-                <div>
-                  <h3 className="text-base font-semibold text-white">Nearby clinics and pharmacies</h3>
-                  <p className="text-sm text-slate-400">Safer, lower-friction care options nearby.</p>
-                </div>
-
-                <div className="space-y-3">
-                  {clinicResults.map((clinic) => (
-                    <ClinicCard key={clinic.id} clinic={clinic} />
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            <button
-              type="button"
-              onClick={handleOverrideToHospitals}
-              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-100 transition hover:bg-red-500/15 active:bg-red-500/20 focus:outline-none focus:ring-4 focus:ring-red-500/20"
-            >
-              <AlertTriangle size={14} />
-              I still need a hospital
-            </button>
-          </section>
-        )}
-
-        {step === STEPS.PATIENT && (
-          <section className="space-y-4" aria-labelledby="patient-heading">
-            {selectedResult && (
-              <div className={`${surfaceClass} p-4 sm:p-5`}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="space-y-1">
-                    <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                      Selected hospital
-                    </p>
-                    <h3 id="patient-heading" className="text-base font-semibold text-white">
-                      {selectedResult.name}
-                    </h3>
-                    {selectedResult.address && (
-                      <p className="text-sm leading-6 text-slate-400">{selectedResult.address}</p>
-                    )}
-                  </div>
-                  <span className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs font-medium text-slate-300">
-                    {selectedResult.distance_km} km
-                  </span>
-                </div>
-              </div>
-            )}
-
-            <form onSubmit={handleBookBed} className={`${surfaceClass} space-y-4 p-4 sm:p-5`}>
-              <div className="space-y-1">
-                <h3 className="text-base font-semibold text-white">Patient details</h3>
-                <p className="text-sm text-slate-400">
-                  Share the minimum needed so the receiving team can prepare.
-                </p>
-              </div>
-
-              <FieldLabel htmlFor="patient-name" icon={<User size={14} />} text="Patient name" />
+          <form onSubmit={handleBookBed} className="space-y-3">
+            {/* Name */}
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block flex items-center gap-1.5">
+                <User size={11} /> Patient name
+              </label>
               <input
-                id="patient-name"
                 type="text"
                 value={patientName}
-                onChange={(event) => setPatientName(event.target.value)}
-                placeholder="John Doe"
-                className={inputClass}
+                onChange={(e) => setPatientName(e.target.value)}
+                placeholder="e.g. John Doe"
+                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-cyan-500/50 transition-all"
               />
-
-              <div className="space-y-2">
-                <FieldLabel
-                  htmlFor="patient-phone"
-                  icon={<Phone size={14} />}
-                  text="Phone number"
-                  required
-                />
-                <input
-                  id="patient-phone"
-                  type="tel"
-                  value={patientPhone}
-                  onChange={(event) => setPatientPhone(event.target.value)}
-                  placeholder="+234..."
-                  required
-                  aria-describedby="patient-phone-help"
-                  className={inputClass}
-                />
-                <p id="patient-phone-help" className="text-xs leading-5 text-slate-500">
-                  The hospital receives the notification through WhatsApp.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <FieldLabel htmlFor="patient-condition" icon={<FileText size={14} />} text="Brief condition" />
-                <textarea
-                  id="patient-condition"
-                  value={patientCondition}
-                  onChange={(event) => setPatientCondition(event.target.value)}
-                  placeholder="Male, 68, fell from height, head injury."
-                  rows={4}
-                  className={`${inputClass} resize-none leading-6`}
-                />
-              </div>
-
-              <button type="submit" disabled={loading || !patientPhone.trim()} className={primaryButtonClass}>
-                {loading ? (
-                  <>
-                    <Loader2 size={16} className="animate-spin" />
-                    Reserving bed
-                  </>
-                ) : (
-                  'Reserve bed'
-                )}
-              </button>
-            </form>
-          </section>
-        )}
-
-        {step === STEPS.TRACKING && (
-          <section className="space-y-4" aria-labelledby="tracking-heading">
-            <div className={`${surfaceClass} p-4 sm:p-5`}>
-              <div className="flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                    Reservation status
-                  </p>
-                  <h3 id="tracking-heading" className="text-base font-semibold text-white">
-                    Track this transfer live
-                  </h3>
-                </div>
-                {handshakeLoading && (
-                  <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs text-slate-400">
-                    <Loader2 size={12} className="animate-spin" />
-                    Updating
-                  </span>
-                )}
-              </div>
-
-              {transferCode && (
-                <div className="mt-4 rounded-2xl border border-cyan-500/20 bg-cyan-500/8 p-4">
-                  <p className="text-xs font-medium uppercase tracking-[0.16em] text-cyan-200/80">
-                    Transfer code
-                  </p>
-                  <div className="mt-3 flex items-center justify-between gap-3">
-                    <span className="text-3xl font-bold tracking-[0.24em] text-white">{transferCode}</span>
-                    <button
-                      type="button"
-                      onClick={copyCode}
-                      aria-label={codeCopied ? 'Transfer code copied' : 'Copy transfer code'}
-                      className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-cyan-400/20 bg-slate-950/60 text-cyan-200 transition hover:bg-slate-900 focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
-                    >
-                      {codeCopied ? <Check size={18} className="text-emerald-400" /> : <Copy size={18} />}
-                    </button>
-                  </div>
-                  <p className="mt-2 text-sm text-slate-300">Show this code when you arrive.</p>
-                </div>
-              )}
-
-              {selectedResult && (
-                <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/50 p-4">
-                  <div className="space-y-1">
-                    <h4 className="text-sm font-semibold text-white">{selectedResult.name}</h4>
-                    {selectedResult.address && (
-                      <p className="text-sm leading-6 text-slate-400">{selectedResult.address}</p>
-                    )}
-                  </div>
-                  {selectedResult.phone && (
-                    <a
-                      href={`tel:${selectedResult.phone}`}
-                      className="mt-4 inline-flex min-h-11 w-full items-center justify-between rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-200 transition hover:border-slate-600 hover:bg-slate-800 focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Phone size={14} className="text-cyan-300" />
-                        {selectedResult.phone}
-                      </span>
-                      <span className="text-xs text-slate-500">Tap to call</span>
-                    </a>
-                  )}
-                </div>
-              )}
             </div>
 
+            {/* Phone */}
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block flex items-center gap-1.5">
+                <Phone size={11} /> Phone number <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="tel"
+                value={patientPhone}
+                onChange={(e) => setPatientPhone(e.target.value)}
+                placeholder="+234..."
+                required
+                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-cyan-500/50 transition-all"
+              />
+              <p className="text-gray-600 text-[10px] mt-1">Hospital will receive notification via WhatsApp</p>
+            </div>
+
+            {/* Condition */}
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block flex items-center gap-1.5">
+                <FileText size={11} /> Brief condition
+              </label>
+              <textarea
+                value={patientCondition}
+                onChange={(e) => setPatientCondition(e.target.value)}
+                placeholder="e.g. Male, 68, fell from height, head injury"
+                rows={2}
+                className="w-full bg-[#151d2e] border border-gray-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-all"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || !patientPhone.trim()}
+              className="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2 mt-2"
+            >
+              {loading ? (
+                <><Loader2 size={14} className="animate-spin" /> Reserving bed...</>
+              ) : (
+                'Reserve bed'
+              )}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* ── STEP 4: Live Status Tracker ─────────────────── */}
+      {step === STEPS.TRACKING && (
+        <div className="px-5 flex-1">
+          {/* Transfer code card */}
+          {transferCode && (
+            <div className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-4 mb-4 text-center">
+              <p className="text-gray-400 text-xs mb-2">Transfer Code</p>
+              <div className="flex items-center justify-center gap-2">
+                <span className="text-white text-3xl font-mono font-bold tracking-widest">
+                  {transferCode}
+                </span>
+                <button
+                  onClick={copyCode}
+                  className="text-gray-500 hover:text-cyan-400 p-1.5 transition-colors"
+                >
+                  {codeCopied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
+                </button>
+              </div>
+              <p className="text-gray-600 text-[10px] mt-2">Show this code when you arrive at the hospital</p>
+            </div>
+          )}
+
+          {/* Hospital contact card */}
+          {selectedResult && (
+            <div className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-3.5 mb-4">
+              <h4 className="text-white text-sm font-medium">{selectedResult.name}</h4>
+              {selectedResult.address && (
+                <p className="text-gray-500 text-xs mt-1">{selectedResult.address}</p>
+              )}
+              {selectedResult.phone && (
+                <a
+                  href={`tel:${selectedResult.phone}`}
+                  className="mt-2 flex items-center gap-2 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/20 rounded-lg px-3 py-2 transition-colors"
+                >
+                  <Phone size={14} className="text-cyan-400" />
+                  <span className="text-cyan-300 text-sm font-medium">{selectedResult.phone}</span>
+                  <span className="text-gray-500 text-[10px] ml-auto">Tap to call</span>
+                </a>
+              )}
+            </div>
+          )}
+
+          {/* Status display */}
+          <div className="space-y-3">
+            {/* Completed — full arrival confirmation (replaces the step list) */}
             {handshake?.status === 'completed' ? (
-              <div className={`${surfaceClass} p-6 text-center`}>
-                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10">
-                  <CheckCircle2 size={30} className="text-emerald-400" />
+              <div className="text-center py-4">
+                {/* Success animation circle */}
+                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-emerald-500/10 border-2 border-emerald-500/30 flex items-center justify-center">
+                  <CheckCircle2 size={32} className="text-emerald-400" />
                 </div>
-                <h3 className="mt-4 text-xl font-semibold text-white">Arrival confirmed</h3>
-                <p className="mt-2 text-sm leading-6 text-slate-400">
-                  The hospital has verified your code and completed check-in.
+
+                <h3 className="text-white text-lg font-semibold mb-1">Arrival Confirmed</h3>
+                <p className="text-gray-400 text-sm mb-4">
+                  You have been checked in at<br />
+                  <span className="text-white font-medium">{selectedResult?.name || 'the hospital'}</span>
                 </p>
-                {transferCode && (
-                  <div className="mx-auto mt-4 inline-flex rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
-                    <span className="font-mono text-lg font-semibold tracking-[0.24em] text-emerald-300">
-                      {transferCode}
-                    </span>
-                  </div>
-                )}
-                <button type="button" onClick={handleReset} className={`${secondaryButtonClass} mt-6 w-auto px-5`}>
+
+                {/* Transfer code (dimmed, for reference) */}
+                <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg px-4 py-3 mb-4 inline-block">
+                  <p className="text-emerald-400/60 text-[10px] uppercase tracking-wider mb-1">Transfer Code</p>
+                  <p className="text-emerald-300 text-xl font-mono font-bold tracking-widest">{transferCode}</p>
+                </div>
+
+                <p className="text-gray-500 text-xs mb-6">
+                  The hospital has verified your code.<br />
+                  Wishing a speedy recovery.
+                </p>
+
+                <button
+                  onClick={handleReset}
+                  className="text-gray-500 hover:text-gray-300 text-xs transition-colors"
+                >
                   Close
                 </button>
               </div>
             ) : (
-              <div className={`${surfaceClass} p-4 sm:p-5`} aria-live="polite">
-                <ol className="space-y-4">
-                  <li>
-                    <StatusStep label="Reservation created" status="done" detail={selectedResult?.name} />
-                  </li>
-                  <li>
-                    <StatusStep label="Hospital notified via WhatsApp" status="done" />
-                  </li>
-                  <li>
+              /* Normal step-by-step tracker */
+              <>
+                <StatusStep
+                  label="Reservation created"
+                  status="done"
+                  detail={selectedResult?.name}
+                />
+                <StatusStep
+                  label="Hospital notified via WhatsApp"
+                  status="done"
+                />
+                <StatusStep
+                  label="Waiting for hospital response"
+                  status={
+                    !handshake || handshake.status === 'requested' ? 'active' :
+                    handshake.status === 'accepted' ? 'done' :
+                    handshake.status === 'declined' ? 'failed' : 'done'
+                  }
+                  detail={
+                    !handshake || handshake.status === 'requested'
+                      ? 'This usually takes 1-3 minutes...'
+                      : undefined
+                  }
+                />
+
+                {handshake?.status === 'accepted' && (
+                  <>
                     <StatusStep
-                      label="Waiting for hospital response"
-                      status={getWaitingStatus(handshake?.status)}
-                      detail={
-                        !handshake || handshake.status === 'requested'
-                          ? 'This usually takes 1 to 3 minutes.'
-                          : undefined
-                      }
+                      label="Bed confirmed!"
+                      status="done"
+                      detail={`Held for ${countdown ? Math.ceil(countdown / 60) : '—'} minutes`}
+                      highlight
                     />
-                  </li>
+                    <StatusStep
+                      label="Awaiting your arrival"
+                      status="active"
+                      detail="Show your transfer code to the nurse on arrival"
+                    />
+                  </>
+                )}
 
-                  {handshake?.status === 'accepted' && (
-                    <>
-                      <li>
-                        <StatusStep
-                          label="Bed confirmed"
-                          status="done"
-                          detail={`Held for ${countdown ? Math.ceil(countdown / 60) : 45} minutes`}
-                          highlight
-                        />
-                      </li>
-                      <li>
-                        <StatusStep
-                          label="Awaiting your arrival"
-                          status="active"
-                          detail="Show your transfer code to the nurse on arrival."
-                        />
-                      </li>
-                    </>
-                  )}
+                {handshake?.status === 'completed' && (
+                  <>
+                    <StatusStep
+                      label="Bed confirmed!"
+                      status="done"
+                    />
+                    <StatusStep
+                      label="Arrival confirmed"
+                      status="done"
+                      detail="You've been admitted. Wishing a speedy recovery."
+                      highlight
+                    />
+                  </>
+                )}
 
-                  {handshake?.status === 'declined' && (
-                    <li>
+                {handshake?.status === 'declined' && (
+                  <StatusStep
+                    label="Hospital could not hold a bed"
+                    status="failed"
+                    detail={
+                      {
+                        no_beds: 'All beds are currently occupied.',
+                        wrong_specialty: "This hospital doesn't have the specialty needed.",
+                        equipment_unavailable: 'Required equipment is currently unavailable.',
+                        too_severe: 'Your condition needs a higher-level facility.',
+                        too_minor: 'Your condition may not need hospital care.',
+                      }[handshake.declined_reason] || handshake.declined_reason || 'Try another hospital'
+                    }
+                  />
+                )}
+
+                {handshake?.status === 'expired' && (
+                  <StatusStep
+                    label="Reservation expired"
+                    status="failed"
+                    detail="The hold time ran out"
+                  />
+                )}
+
+                {handshake?.status === 'overridden' && (
+                  <>
+                    <StatusStep
+                      label="Bed reassigned — we're sorry"
+                      status="failed"
+                      detail="A critical walk-in emergency required immediate care. We understand this is frustrating."
+                    />
+                    {rerouteLoading && (
                       <StatusStep
-                        label="Hospital could not hold a bed"
-                        status="failed"
-                        detail={getDeclineReason(handshake.declined_reason)}
+                        label="Finding you another hospital..."
+                        status="active"
+                        detail="We're on it — no action needed from you"
                       />
-                    </li>
-                  )}
-
-                  {handshake?.status === 'expired' && (
-                    <li>
+                    )}
+                    {rerouteResults && rerouteResults.length > 0 && (
                       <StatusStep
-                        label="Reservation expired"
+                        label={`We've found ${rerouteResults.length} alternative${rerouteResults.length > 1 ? 's' : ''} for you`}
+                        status="done"
+                        detail="Tap one to confirm and we'll reserve it immediately"
+                        highlight
+                      />
+                    )}
+                    {rerouteResults && rerouteResults.length === 0 && (
+                      <StatusStep
+                        label="No alternatives found nearby"
                         status="failed"
-                        detail="The hold time ran out."
+                        detail="Try searching again with a wider area"
                       />
-                    </li>
-                  )}
+                    )}
+                  </>
+                )}
+              </>
+            )}
+          </div>
 
-                  {handshake?.status === 'overridden' && (
-                    <>
-                      <li>
-                        <StatusStep
-                          label="Bed reassigned"
-                          status="failed"
-                          detail="A critical walk-in required immediate care. We understand this is frustrating."
-                        />
-                      </li>
-                      {rerouteLoading && (
-                        <li>
-                          <StatusStep
-                            label="Finding another hospital"
-                            status="active"
-                            detail="We’re searching automatically now."
-                          />
-                        </li>
-                      )}
-                      {rerouteResults && rerouteResults.length > 0 && (
-                        <li>
-                          <StatusStep
-                            label={`Found ${rerouteResults.length} alternative${rerouteResults.length > 1 ? 's' : ''}`}
-                            status="done"
-                            detail="Select one below to continue."
-                            highlight
-                          />
-                        </li>
-                      )}
-                      {rerouteResults && rerouteResults.length === 0 && (
-                        <li>
-                          <StatusStep
-                            label="No alternatives found nearby"
-                            status="failed"
-                            detail="Try a new search with a wider area."
-                          />
-                        </li>
-                      )}
-                    </>
-                  )}
-                </ol>
+          {/* Reroute results for overridden */}
+          {handshake?.status === 'overridden' && rerouteResults && rerouteResults.length > 0 && (
+            <div className="mt-4">
+              <p className="text-gray-400 text-xs mb-2">Alternative hospitals found:</p>
+              <div className="space-y-2">
+                {rerouteResults.map((result, idx) => {
+                  const beds = result.beds || {};
+                  return (
+                    <button
+                      key={result.hospital_id}
+                      onClick={() => {
+                        // Select this hospital and go to patient details
+                        setSelectedResult(result);
+                        const hospital = hospitals.find(h => h.id === result.hospital_id);
+                        if (hospital) onHospitalSelect(hospital);
+                        setHandshakeId(null);
+                        setTransferCode(null);
+                        setRerouteResults(null);
+                        if (description && !patientCondition) {
+                          setPatientCondition(description);
+                        }
+                        setStep(STEPS.PATIENT);
+                      }}
+                      className="w-full text-left bg-[#151d2e] hover:bg-[#1a2435] border border-gray-800/50 hover:border-cyan-500/30 rounded-xl p-3 transition-all group"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+                          idx === 0 ? 'bg-cyan-500 text-white' : 'bg-gray-700 text-gray-300'
+                        }`}>
+                          {idx + 1}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <h4 className="text-white text-xs font-medium truncate group-hover:text-cyan-300 transition-colors">
+                              {result.name}
+                            </h4>
+                            <span className="text-gray-500 text-[10px] flex-shrink-0">{result.distance_km}km</span>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2 mt-1">
+                            {Object.entries(beds).map(([type, data]) => (
+                              <span key={type} className="text-[10px]">
+                                <span className="text-gray-500">{type.toUpperCase()}: </span>
+                                <span className={data.available > 0 ? 'text-emerald-400' : 'text-red-400'}>
+                                  {data.available || 0}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
-            )}
+            </div>
+          )}
 
-            {handshake?.status === 'overridden' && rerouteResults?.length > 0 && (
-              <div className="space-y-3">
-                <div>
-                  <h3 className="text-base font-semibold text-white">Alternative hospitals</h3>
-                  <p className="text-sm text-slate-400">
-                    Pick another option and we’ll continue with the reservation flow.
-                  </p>
-                </div>
-                <ul className="space-y-3">
-                  {rerouteResults.map((result, index) => (
-                    <li key={result.hospital_id}>
-                      <ResultCard
-                        result={result}
-                        index={index}
-                        compact
-                        onSelect={(item) => {
-                          setSelectedResult(item);
-                          const hospital = hospitals.find((entry) => entry.id === item.hospital_id);
-                          if (hospital) onHospitalSelect(hospital);
-                          setHandshakeId(null);
-                          setTransferCode(null);
-                          setRerouteResults(null);
-                          if (description && !patientCondition) {
-                            setPatientCondition(description);
-                          }
-                          setStep(STEPS.PATIENT);
-                        }}
-                      />
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+          {/* Actions based on status */}
+          {handshake?.status === 'accepted' && selectedResult && (
+            <div className="mt-4 flex gap-2">
+              <a
+                href={`https://maps.google.com/maps?daddr=${selectedResult.address || selectedResult.name + ' Lagos'}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2"
+              >
+                <Navigation size={14} />
+                Directions
+              </a>
+              <a
+                href={`https://wa.me/?text=${encodeURIComponent(
+                  `🏥 BedSignal — Bed Reserved\n\n` +
+                  `Hospital: ${selectedResult.name}\n` +
+                  `Transfer Code: ${transferCode}\n` +
+                  `Address: ${selectedResult.address || ''}\n\n` +
+                  `Directions: https://maps.google.com/maps?daddr=${encodeURIComponent(selectedResult.address || selectedResult.name + ' Lagos')}\n\n` +
+                  `Show the transfer code on arrival.`
+                )}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 bg-[#25D366] hover:bg-[#20bd5a] text-white text-sm font-medium py-3 rounded-lg transition-all flex items-center justify-center gap-2"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+                Share
+              </a>
+            </div>
+          )}
 
-            {handshake?.status === 'accepted' && selectedResult && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <a
-                  href={`https://maps.google.com/maps?daddr=${encodeURIComponent(
-                    selectedResult.address || `${selectedResult.name} Lagos`
-                  )}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-400 active:bg-emerald-300 focus:outline-none focus:ring-4 focus:ring-emerald-500/20"
-                >
-                  <Navigation size={16} />
-                  Get directions
-                </a>
-                <a
-                  href={`https://wa.me/?text=${encodeURIComponent(
-                    `BedSignal - Bed Reserved\n\nHospital: ${selectedResult.name}\nTransfer Code: ${transferCode}\nAddress: ${
-                      selectedResult.address || ''
-                    }\n\nDirections: https://maps.google.com/maps?daddr=${encodeURIComponent(
-                      selectedResult.address || `${selectedResult.name} Lagos`
-                    )}\n\nShow the transfer code on arrival.`
-                  )}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-[#25D366] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#20bd5a] active:bg-[#1ca652] focus:outline-none focus:ring-4 focus:ring-[#25D366]/20"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" />
-                  </svg>
-                  Share details
-                </a>
-              </div>
-            )}
+          {(handshake?.status === 'declined' || handshake?.status === 'expired' || handshake?.status === 'overridden') && (
+            <button
+              onClick={handleReset}
+              className="w-full mt-4 bg-cyan-500 hover:bg-cyan-400 text-white text-sm font-medium py-3 rounded-lg transition-all"
+            >
+              Search again
+            </button>
+          )}
 
-            {(handshake?.status === 'declined' ||
-              handshake?.status === 'expired' ||
-              handshake?.status === 'overridden') && (
-              <button type="button" onClick={handleReset} className={primaryButtonClass}>
-                Search again
-              </button>
-            )}
+          {/* Countdown timer for accepted */}
+          {handshake?.status === 'accepted' && countdown > 0 && (
+            <div className="mt-4 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-center">
+              <p className="text-amber-400 text-xs">Bed held for</p>
+              <p className="text-amber-300 text-xl font-mono font-bold mt-1">
+                {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
+              </p>
+              <p className="text-amber-400/60 text-[10px] mt-1">Please arrive before the hold expires</p>
+            </div>
+          )}
+        </div>
+      )}
 
-            {handshake?.status === 'accepted' && countdown > 0 && (
-              <div className="rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-4 text-center">
-                <p className="text-xs font-medium uppercase tracking-[0.16em] text-amber-200/80">
-                  Bed hold expires in
-                </p>
-                <p className="mt-2 font-mono text-2xl font-semibold text-amber-100">
-                  {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
-                </p>
-                <p className="mt-1 text-sm text-amber-100/80">Please arrive before the timer ends.</p>
-              </div>
-            )}
-          </section>
-        )}
-      </main>
-
-      <footer className="border-t border-slate-800/80 px-4 py-4 sm:px-6">
+      {/* ── Footer ──────────────────────────────────────── */}
+      <div className="p-4 border-t border-gray-800/50">
         {step === STEPS.TRACKING ? (
           <button
-            type="button"
             onClick={handleReset}
-            className="text-sm font-medium text-slate-400 transition hover:text-white focus:outline-none focus:ring-4 focus:ring-cyan-500/20"
+            className="w-full text-gray-500 hover:text-gray-300 text-xs text-center transition-colors"
           >
             Start a new search
           </button>
         ) : (
-          <p className="text-xs leading-5 text-slate-500">
-            In an emergency, text <span className="font-semibold text-cyan-300">EMERGENCY</span> to
-            our WhatsApp line.
+          <p className="text-gray-600 text-[10px] text-center">
+            In an emergency? Text <span className="text-cyan-400 font-medium">EMERGENCY</span> to our WhatsApp
           </p>
         )}
-      </footer>
-    </aside>
-  );
-}
-
-function ModeButton({ active, icon, label, description, onClick }) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={`rounded-xl px-3 py-3 text-left transition focus:outline-none focus:ring-4 focus:ring-cyan-500/20 ${
-        active
-          ? 'bg-slate-900 text-white shadow-sm ring-1 ring-cyan-500/20'
-          : 'text-slate-400 hover:bg-slate-900/70 hover:text-slate-200'
-      }`}
-    >
-      <span className="flex items-center gap-2 text-sm font-semibold">
-        <span className={active ? 'text-cyan-300' : 'text-slate-500'}>{icon}</span>
-        {label}
-      </span>
-      <span className="mt-1 block text-xs text-slate-500">{description}</span>
-    </button>
-  );
-}
-
-function AnalysisCard({ triageAnalysis, tone, title }) {
-  const urgencyTone =
-    triageAnalysis?.urgency === 'critical'
-      ? 'bg-red-500/15 text-red-200'
-      : triageAnalysis?.urgency === 'high'
-        ? 'bg-amber-500/15 text-amber-100'
-        : 'bg-emerald-500/15 text-emerald-100';
-  const toneClass =
-    tone === 'amber'
-      ? 'border-amber-500/20 bg-amber-500/8'
-      : 'border-cyan-500/20 bg-cyan-500/8';
-
-  return (
-    <div className={`rounded-2xl border p-4 sm:p-5 ${toneClass}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-1">
-          <p className="text-xs font-medium uppercase tracking-[0.16em] text-slate-400">{title}</p>
-          <h3 className="text-base font-semibold text-white">
-            {formatConditionCategory(triageAnalysis?.condition_category)}
-          </h3>
-        </div>
-        <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ${urgencyTone}`}>
-          {triageAnalysis?.urgency || 'unknown'}
-        </span>
       </div>
-      {triageAnalysis?.required_equipment?.length > 0 && (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {triageAnalysis.required_equipment.slice(0, 4).map((equipment) => (
-            <span
-              key={equipment}
-              className="rounded-full border border-slate-700 bg-slate-950/60 px-3 py-1 text-xs text-slate-300"
-            >
-              {equipment.replace(/_/g, ' ')}
-            </span>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
 
-function ResultCard({ result, index, onSelect, compact = false }) {
-  const beds = result.beds || {};
 
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(result)}
-      className={`group w-full rounded-2xl border border-slate-800 bg-slate-900/75 text-left transition hover:border-cyan-500/30 hover:bg-slate-900 focus:outline-none focus:ring-4 focus:ring-cyan-500/20 ${
-        compact ? 'p-4' : 'p-4 sm:p-5'
-      }`}
-    >
-      <div className="flex items-start gap-3">
-        <span
-          className={`inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-sm font-semibold ${
-            index === 0 ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'
-          }`}
-        >
-          {index + 1}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h4 className="truncate text-sm font-semibold text-white transition group-hover:text-cyan-300">
-                {result.name}
-              </h4>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <Badge tone="slate">{result.distance_km} km away</Badge>
-                {result.trust_tier === 'verified' && <Badge tone="green">Verified</Badge>}
-                {result.trust_tier === 'unverified' && <Badge tone="amber">Unverified</Badge>}
-                {result.freshness_hours != null && <Badge tone="slate">{formatFreshness(result.freshness_hours)}</Badge>}
-              </div>
-            </div>
-          </div>
-
-          <dl className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {Object.entries(beds).map(([type, data]) => (
-              <div key={type} className="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2.5">
-                <dt className="text-[11px] font-medium uppercase tracking-[0.14em] text-slate-500">
-                  {type}
-                </dt>
-                <dd
-                  className={`mt-1 text-sm font-semibold ${
-                    data.available > 0
-                      ? 'text-emerald-300'
-                      : data.overflow > 0
-                        ? 'text-amber-300'
-                        : 'text-red-300'
-                  }`}
-                >
-                  {data.available > 0 ? `${data.available} available` : data.overflow > 0 ? `${data.overflow} overflow` : 'No availability'}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function ClinicCard({ clinic }) {
-  return (
-    <article className={`${surfaceClass} p-4 sm:p-5`}>
-      <div className="space-y-1">
-        <h4 className="text-sm font-semibold text-white">{clinic.name}</h4>
-        {clinic.address && <p className="text-sm leading-6 text-slate-400">{clinic.address}</p>}
-      </div>
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {clinic.phone && (
-          <a href={`tel:${clinic.phone}`} className={secondaryButtonClass}>
-            <Phone size={14} />
-            Call
-          </a>
-        )}
-        <a
-          href={`https://maps.google.com/maps?daddr=${encodeURIComponent(
-            clinic.address || `${clinic.name} Lagos`
-          )}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-500/10 px-4 py-3 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/20 focus:outline-none focus:ring-4 focus:ring-emerald-500/20"
-        >
-          <Navigation size={14} />
-          Directions
-        </a>
-      </div>
-    </article>
-  );
-}
-
-function FieldLabel({ htmlFor, icon, text, required = false }) {
-  return (
-    <label htmlFor={htmlFor} className="flex items-center gap-2 text-sm font-medium text-slate-300">
-      <span className="text-slate-500">{icon}</span>
-      {text}
-      {required && <span className="text-red-300">*</span>}
-    </label>
-  );
-}
-
-function EmptyState({ title, description }) {
-  return (
-    <div className={`${surfaceClass} px-4 py-8 text-center sm:px-5`}>
-      <p className="text-base font-semibold text-white">{title}</p>
-      <p className="mt-2 text-sm leading-6 text-slate-400">{description}</p>
-    </div>
-  );
-}
-
-function Badge({ children, tone }) {
-  const classes = {
-    slate: 'border-slate-700 bg-slate-950/60 text-slate-300',
-    green: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200',
-    amber: 'border-amber-500/20 bg-amber-500/10 text-amber-100',
-  };
-
-  return (
-    <span className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${classes[tone]}`}>
-      {children}
-    </span>
-  );
-}
-
+/**
+ * StatusStep — single step in the status tracker.
+ */
 function StatusStep({ label, status, detail, highlight }) {
   const icons = {
-    done: <CheckCircle2 size={18} className="text-emerald-400" />,
-    active: <Loader2 size={18} className="animate-spin text-cyan-300" />,
-    failed: <XCircle size={18} className="text-red-300" />,
-    pending: <Clock size={18} className="text-slate-600" />,
+    done: <CheckCircle2 size={16} className="text-emerald-400" />,
+    active: <Loader2 size={16} className="text-cyan-400 animate-spin" />,
+    failed: <XCircle size={16} className="text-red-400" />,
+    pending: <Clock size={16} className="text-gray-600" />,
   };
 
   return (
-    <div
-      className={`flex items-start gap-3 rounded-2xl ${
-        highlight ? 'border border-emerald-500/20 bg-emerald-500/8 p-4' : ''
-      }`}
-    >
-      <div className="mt-0.5 flex-shrink-0">{icons[status] || icons.pending}</div>
-      <div className="space-y-1">
-        <p
-          className={`text-sm font-medium ${
-            status === 'done'
-              ? 'text-white'
-              : status === 'active'
-                ? 'text-cyan-200'
-                : status === 'failed'
-                  ? 'text-red-200'
-                  : 'text-slate-500'
-          }`}
-        >
+    <div className={`flex items-start gap-3 ${highlight ? 'bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-3 -mx-1' : ''}`}>
+      <div className="mt-0.5 flex-shrink-0">
+        {icons[status] || icons.pending}
+      </div>
+      <div>
+        <p className={`text-sm ${
+          status === 'done' ? 'text-white' :
+          status === 'active' ? 'text-cyan-300' :
+          status === 'failed' ? 'text-red-400' :
+          'text-gray-500'
+        }`}>
           {label}
         </p>
-        {detail && <p className="text-sm leading-6 text-slate-400">{detail}</p>}
+        {detail && (
+          <p className="text-gray-500 text-xs mt-0.5">{detail}</p>
+        )}
       </div>
     </div>
   );
-}
-
-function getStepCopy(step, searchResults, selectedResult, transferCode) {
-  if (step === STEPS.RESULTS) {
-    return {
-      title: 'Choose a hospital',
-      description: `${searchResults?.length || 0} hospital${searchResults?.length === 1 ? '' : 's'} found`,
-    };
-  }
-
-  if (step === STEPS.LOW_URGENCY) {
-    return {
-      title: 'Consider lower-acuity care',
-      description: 'A clinic may be a better fit for this situation.',
-    };
-  }
-
-  if (step === STEPS.PATIENT) {
-    return {
-      title: 'Add patient details',
-      description: selectedResult?.name || 'Share the essentials for handoff.',
-    };
-  }
-
-  if (step === STEPS.TRACKING) {
-    return {
-      title: 'Bed reservation',
-      description: transferCode ? `Transfer code ${transferCode}` : 'Creating reservation...',
-    };
-  }
-
-  return {
-    title: 'Find a hospital',
-    description: 'Describe the situation or search nearby facilities.',
-  };
-}
-
-function getProgressItems(step) {
-  const lowUrgency = step === STEPS.LOW_URGENCY;
-  const items = lowUrgency
-    ? [
-        { label: 'Search', step: STEPS.SEARCH },
-        { label: 'Assessment', step: STEPS.LOW_URGENCY },
-        { label: 'Clinics', step: STEPS.LOW_URGENCY },
-      ]
-    : [
-        { label: 'Search', step: STEPS.SEARCH },
-        { label: 'Select', step: STEPS.RESULTS },
-        { label: 'Details', step: STEPS.PATIENT },
-        { label: 'Track', step: STEPS.TRACKING },
-      ];
-  const order = lowUrgency
-    ? [STEPS.SEARCH, STEPS.LOW_URGENCY, STEPS.LOW_URGENCY]
-    : [STEPS.SEARCH, STEPS.RESULTS, STEPS.PATIENT, STEPS.TRACKING];
-  const currentIndex = order.indexOf(step);
-
-  return items.map((item, index) => ({
-    ...item,
-    state: index < currentIndex ? 'complete' : index === currentIndex ? 'current' : 'pending',
-  }));
-}
-
-function getWaitingStatus(status) {
-  if (!status || status === 'requested') return 'active';
-  if (status === 'accepted' || status === 'overridden') return 'done';
-  if (status === 'declined' || status === 'expired') return 'failed';
-  return 'pending';
-}
-
-function getDeclineReason(reason) {
-  return (
-    {
-      no_beds: 'All beds are currently occupied.',
-      wrong_specialty: 'This hospital does not have the specialty required.',
-      equipment_unavailable: 'Required equipment is currently unavailable.',
-      too_severe: 'The condition needs a higher-level facility.',
-      too_minor: 'The condition may not need hospital care.',
-    }[reason] || reason || 'Try another hospital.'
-  );
-}
-
-function formatConditionCategory(value) {
-  if (!value) return 'General emergency';
-  return value
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function formatFreshness(hours) {
-  if (hours < 1) return `${Math.round(hours * 60)} min ago`;
-  return `${Math.round(hours)} h ago`;
-}
-
-async function getUserCoordinates() {
-  try {
-    const position = await new Promise((resolve, reject) =>
-      navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 })
-    );
-
-    return {
-      lat: position.coords.latitude,
-      lng: position.coords.longitude,
-    };
-  } catch (_) {
-    return FALLBACK_LOCATION;
-  }
 }

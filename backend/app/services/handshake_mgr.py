@@ -183,6 +183,21 @@ async def decline_handshake(handshake_id: str, reason: str | None = None) -> dic
         .execute()
     )
 
+    # If this handshake is linked to a broadcast patient, reset them to unassigned
+    bp = (
+        supabase.table("broadcast_patients")
+        .select("id")
+        .eq("handshake_id", handshake_id)
+        .execute()
+    )
+    if bp.data:
+        supabase.table("broadcast_patients").update({
+            "status": "unassigned",
+            "assigned_hospital_id": None,
+            "handshake_id": None,
+        }).eq("handshake_id", handshake_id).execute()
+        print(f"   ↩️ MCI patient reset to unassigned (hospital declined)")
+
     print(f"❌ HANDSHAKE DECLINED: {handshake_id[:8]}...")
     return updated.data[0] if updated.data else result.data[0]
 

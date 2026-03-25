@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # ── Google Maps (optional — needed for Dispatch ETA) ──────
     GOOGLE_MAPS_API_KEY: str = ""
 
+    MAPBOX_TOKEN: str = ""
+
     # ── App ───────────────────────────────────────────────────
     APP_ENV: str = "development"
     BASE_URL: str = "http://localhost:8000"
