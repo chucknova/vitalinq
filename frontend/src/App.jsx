@@ -8,6 +8,7 @@ import BroadcastList from './pages/BroadcastList';
 import BroadcastDashboard from './pages/BroadcastDashboard';
 import BroadcastPatientLog from './pages/BroadcastPatientLog';
 import AmbulanceTracker from './pages/AmbulanceTracker';
+import TransportQueue from './pages/TransportQueue';
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
         <Route path="/broadcast/:id" element={<BroadcastDashboard />} />
         <Route path="/broadcast/:id/log" element={<BroadcastPatientLog />} />
         <Route path="/ambulance/:patientId" element={<AmbulanceTracker />} />
+        <Route path="/dispatch" element={<TransportQueue />} />
       </Routes>
     </BrowserRouter>
   );

@@ -15,6 +15,8 @@ from app.models.handshake import (
     HandshakeCompleteRequest,
     HandshakeCompleteResponse,
     HospitalBrief,
+    TransportRequestCreate,
+    TransportRequestResponse,
 )
 from app.services.handshake_mgr import (
     create_handshake,
@@ -22,6 +24,7 @@ from app.services.handshake_mgr import (
     get_handshake_detail,
 )
 from app.database import supabase
+from app.services.transport_queue import request_transport
 
 router = APIRouter(prefix="/handshakes", tags=["Handshakes"])
 
@@ -109,6 +112,7 @@ async def get_handshake_status(handshake_id: str):
         ),
         bed_type=handshake["bed_type"],
         patient_summary=handshake.get("patient_summary"),
+        parsed_requirements=handshake.get("parsed_requirements"),
         expires_at=handshake.get("expires_at"),
         time_remaining_sec=handshake.get("_time_remaining_sec"),
         declined_reason=handshake.get("declined_reason"),
@@ -133,4 +137,47 @@ async def complete_handshake_endpoint(handshake_id: str, request: HandshakeCompl
     return HandshakeCompleteResponse(
         status="completed",
         completed_at=handshake.get("completed_at", datetime.now(timezone.utc)),
+    )
+
+
+@router.post("/{handshake_id}/transport", response_model=TransportRequestResponse)
+async def request_transport_endpoint(handshake_id: str, request: TransportRequestCreate):
+    """Patient requests transport after a bed has been accepted."""
+
+    handshake = await get_handshake_detail(handshake_id)
+    if not handshake:
+        raise HTTPException(status_code=404, detail="Handshake not found")
+
+    try:
+        transport = request_transport(
+            handshake_id=handshake_id,
+            pickup_lat=request.pickup_lat,
+            pickup_lng=request.pickup_lng,
+            pickup_address=request.pickup_address,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    hospital_info = handshake.get("_hospital", {})
+
+    from app.services.whatsapp import send_text
+
+    hospital_phone = hospital_info.get("whatsapp_number")
+    if hospital_phone:
+        urgency = (handshake.get("parsed_requirements") or {}).get("urgency", "medium").upper()
+        await send_text(
+            hospital_phone,
+            (
+                f"🚑 *Transport Needed for Incoming Patient*\n\n"
+                f"Transfer code: *{handshake['transfer_code']}*\n"
+                f"Urgency: *{urgency}*\n"
+                f"Patient: {handshake.get('patient_summary') or 'No details provided'}\n"
+                f"Pickup: {request.pickup_address or 'Shared GPS location'}\n\n"
+                f"Please coordinate your ambulance team or call LASEMA / a partner service."
+            ),
+        )
+
+    return TransportRequestResponse(
+        handshake_id=handshake_id,
+        transport=transport,
     )

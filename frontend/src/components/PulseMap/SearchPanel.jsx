@@ -54,6 +54,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [codeCopied, setCodeCopied] = useState(false);
   const [rerouteResults, setRerouteResults] = useState(null);
   const [rerouteLoading, setRerouteLoading] = useState(false);
+  const [transportLoading, setTransportLoading] = useState(false);
 
   // Live status polling
   const { handshake, loading: handshakeLoading, countdown } = useHandshake(handshakeId);
@@ -347,6 +348,26 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     }
   }
 
+  async function handleRequestTransport() {
+    if (!handshakeId) return;
+
+    setTransportLoading(true);
+    setError(null);
+
+    try {
+      const { latitude, longitude } = await getCurrentLocation(10000);
+      await api.post(`/api/handshakes/${handshakeId}/transport`, {
+        pickup_lat: latitude,
+        pickup_lng: longitude,
+        pickup_address: 'Patient live location',
+      });
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to request transport.');
+    } finally {
+      setTransportLoading(false);
+    }
+  }
+
   // ── Collapsed state ────────────────────────────────────
   if (collapsed) {
     return (
@@ -363,6 +384,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
   // Step order arrays
   const isLowUrgency = step === STEPS.LOW_URGENCY;
+  const transportRequest = handshake?.parsed_requirements?.transport || null;
   const stepLabels = isLowUrgency
     ? ['Search', 'Assessment', 'Clinics']
     : ['Search', 'Select', 'Details', 'Track'];
@@ -1054,6 +1076,30 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
             </div>
           )}
 
+          {handshake?.status === 'accepted' && transportRequest && (
+            <div className={`mb-4 rounded-2xl px-4 py-3.5 border ${
+              transportRequest.status === 'dispatched'
+                ? 'bg-emerald-500/[0.08] border-emerald-500/20'
+                : 'bg-amber-500/[0.08] border-amber-500/20'
+            }`}>
+              <p className={`text-xs font-semibold uppercase tracking-wider ${
+                transportRequest.status === 'dispatched' ? 'text-emerald-300' : 'text-amber-300'
+              }`}>
+                Transport {transportRequest.status}
+              </p>
+              <p className="text-white text-sm mt-1 leading-relaxed">
+                {transportRequest.status === 'dispatched'
+                  ? `${transportRequest.provider_name || 'Ambulance provider'} is heading to your pickup point.`
+                  : 'Your receiving hospital and dispatch queue have been alerted.'}
+              </p>
+              {transportRequest.provider_eta_min && (
+                <p className="text-gray-400 text-xs mt-2">
+                  Estimated arrival: about {transportRequest.provider_eta_min} minutes
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Status display */}
           <div
             role="status"
@@ -1274,32 +1320,51 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
           {/* Actions based on status */}
           {handshake?.status === 'accepted' && selectedResult && (
-            <div className="mt-4 flex gap-2.5">
-              <a
-                href={`https://maps.google.com/maps?daddr=${selectedResult.address || selectedResult.name + ' Lagos'}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex-1 min-h-[48px] bg-sky-500 hover:bg-sky-400 text-white text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+            <div className="mt-4 space-y-2.5">
+              <div className="flex gap-2.5">
+                <a
+                  href={`https://maps.google.com/maps?daddr=${selectedResult.address || selectedResult.name + ' Lagos'}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 min-h-[48px] bg-sky-500 hover:bg-sky-400 text-white text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+                >
+                  <Navigation size={15} />
+                  Directions
+                </a>
+                <a
+                  href={`https://wa.me/?text=${encodeURIComponent(
+                    `🏥 BedSignal — Bed Reserved\n\n` +
+                    `Hospital: ${selectedResult.name}\n` +
+                    `Transfer Code: ${transferCode}\n` +
+                    `Address: ${selectedResult.address || ''}\n\n` +
+                    `Directions: https://maps.google.com/maps?daddr=${encodeURIComponent(selectedResult.address || selectedResult.name + ' Lagos')}\n\n` +
+                    `Show the transfer code on arrival.`
+                  )}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 min-h-[48px] bg-[#25D366] hover:bg-[#20bd5a] text-white text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 focus-visible:ring-2 focus-visible:ring-[#25D366] focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+                  Share
+                </a>
+              </div>
+
+              <button
+                onClick={handleRequestTransport}
+                disabled={transportLoading || !!transportRequest}
+                className="w-full min-h-[48px] bg-red-500/10 hover:bg-red-500/20 disabled:bg-white/[0.05] disabled:text-gray-600 disabled:border-white/[0.06] border border-red-500/25 text-red-300 text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2.5 focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
               >
-                <Navigation size={15} />
-                Directions
-              </a>
-              <a
-                href={`https://wa.me/?text=${encodeURIComponent(
-                  `🏥 BedSignal — Bed Reserved\n\n` +
-                  `Hospital: ${selectedResult.name}\n` +
-                  `Transfer Code: ${transferCode}\n` +
-                  `Address: ${selectedResult.address || ''}\n\n` +
-                  `Directions: https://maps.google.com/maps?daddr=${encodeURIComponent(selectedResult.address || selectedResult.name + ' Lagos')}\n\n` +
-                  `Show the transfer code on arrival.`
-                )}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex-1 min-h-[48px] bg-[#25D366] hover:bg-[#20bd5a] text-white text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 focus-visible:ring-2 focus-visible:ring-[#25D366] focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
-              >
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
-                Share
-              </a>
+                {transportLoading ? (
+                  <>
+                    <Loader2 size={16} className="motion-reduce:animate-none animate-spin" />
+                    Requesting transport...
+                  </>
+                ) : transportRequest ? (
+                  <>Transport requested</>
+                ) : (
+                  <>🚑 I need transport</>
+                )}
+              </button>
             </div>
           )}
 

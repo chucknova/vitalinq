@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.tasks.scheduler import start_scheduler, stop_scheduler
-from app.routers import search, hospitals, webhooks, handshakes, onboard, log, dashboard, broadcast
+from app.routers import search, hospitals, webhooks, handshakes, onboard, log, dashboard, broadcast, transport
 
 
 # ---------------------------------------------------------------------------
@@ -82,4 +82,5 @@ app.include_router(onboard.router, prefix="/api")
 app.include_router(log.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(broadcast.router, prefix="/api")
+app.include_router(transport.router, prefix="/api")
 # ---------------------------------------------------------------------------

@@ -53,9 +53,23 @@ class HandshakeStatusResponse(BaseModel):
     receiving_hospital: HospitalBrief
     bed_type: str
     patient_summary: Optional[str]
+    parsed_requirements: Optional[dict] = None
     expires_at: Optional[datetime]
     time_remaining_sec: Optional[int]
     declined_reason: Optional[str] = None
+
+
+class TransportRequestCreate(BaseModel):
+    """POST /api/handshakes/{id}/transport — patient requests transport."""
+    pickup_lat: float
+    pickup_lng: float
+    pickup_address: Optional[str] = None
+
+
+class TransportRequestResponse(BaseModel):
+    """Transport request state attached to a handshake."""
+    handshake_id: str
+    transport: dict
 
 
 # ---------------------------------------------------------------------------

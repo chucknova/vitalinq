@@ -431,6 +431,7 @@ export default function HospitalDashboard() {
               const remaining = hs.time_remaining_sec;
               const hsLoading = actionLoading[`hs_${hs.id}`];
               const urgency = hs.parsed_requirements?.urgency || hs._urgency || null;
+              const transport = hs.parsed_requirements?.transport || null;
 
               const urgencyConfig = {
                 critical: { label: 'CRITICAL', color: 'bg-red-500/20 text-red-400 border-red-500/30' },
@@ -470,6 +471,21 @@ export default function HospitalDashboard() {
                       {/* Patient summary */}
                       {hs.patient_summary && (
                         <p className="text-gray-400 text-xs mb-2 line-clamp-2">{hs.patient_summary}</p>
+                      )}
+
+                      {transport && (
+                        <div className={`inline-flex items-center gap-1.5 text-[10px] font-medium px-2 py-1 rounded-lg mb-2 ${
+                          transport.status === 'dispatched'
+                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/20'
+                            : 'bg-amber-500/15 text-amber-300 border border-amber-500/20'
+                        }`}>
+                          <span>🚑</span>
+                          <span>
+                            {transport.status === 'dispatched'
+                              ? `Transport dispatched${transport.provider_name ? ` via ${transport.provider_name}` : ''}`
+                              : 'Patient requested transport assistance'}
+                          </span>
+                        </div>
                       )}
 
                       {/* Countdown for accepted */}
