@@ -10,6 +10,8 @@ from fastapi import APIRouter
 from app.models.hospital import (
     NearbySearchRequest,
     NearbySearchResponse,
+    TriageChatRequest,
+    TriageChatResponse,
     TriageSearchRequest,
     TriageSearchResponse,
     ParsedRequirements,
@@ -17,6 +19,7 @@ from app.models.hospital import (
     BedStatus,
 )
 from app.services.search_engine import search_nearby
+from app.services.triage_chat import run_triage_chat
 from app.services.triage import parse_emergency
 
 router = APIRouter(prefix="/search", tags=["Search"])
@@ -142,4 +145,54 @@ async def triage_search(request: TriageSearchRequest):
         parsed_requirements=ParsedRequirements(**parsed),
         results=hospital_results,
         query_id=query_id,
+    )
+
+
+@router.post("/chat", response_model=TriageChatResponse)
+async def triage_chat(request: TriageChatRequest):
+    """
+    Conversational triage for the web booking flow.
+
+    Accepts the full chat history, decides whether to ask one clarifying
+    question or run a hospital search, and returns the next assistant turn.
+    """
+
+    payload = await run_triage_chat(
+        messages=[msg.model_dump() for msg in request.messages],
+        latitude=request.latitude,
+        longitude=request.longitude,
+        radius_km=request.radius_km,
+    )
+
+    hospital_results = []
+    for r in payload["results"]:
+        beds = {}
+        for bed_type, bed_data in r["beds"].items():
+            beds[bed_type] = BedStatus(
+                available=bed_data["available"],
+                overflow=bed_data["overflow"],
+                tier=bed_data["tier"],
+            )
+
+        hospital_results.append(HospitalSearchResult(
+            hospital_id=r["hospital_id"],
+            name=r["name"],
+            distance_km=r["distance_km"],
+            address=r["address"],
+            trust_tier=r["trust_tier"],
+            beds=beds,
+            equipment=r["equipment"],
+            last_report_at=r["last_report_at"],
+            freshness_hours=r["freshness_hours"],
+            composite_score=r["composite_score"],
+        ))
+
+    return TriageChatResponse(
+        assistant_message=payload["assistant_message"],
+        should_search=payload["should_search"],
+        parsed_requirements=ParsedRequirements(**payload["parsed_requirements"])
+        if payload["parsed_requirements"]
+        else None,
+        results=hospital_results,
+        query_id=payload["query_id"],
     )

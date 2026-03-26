@@ -8,9 +8,9 @@ FastAPI uses them to:
   - Serialize responses (convert Python objects to JSON)
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 from datetime import datetime
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,29 @@ class TriageSearchResponse(BaseModel):
     parsed_requirements: ParsedRequirements
     results: list[HospitalSearchResult]
     query_id: str
+
+
+class TriageChatMessage(BaseModel):
+    """Single chat bubble in the conversational triage flow."""
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=1000)
+
+
+class TriageChatRequest(BaseModel):
+    """POST /api/search/chat — multi-turn triage chat for web booking."""
+    messages: list[TriageChatMessage] = Field(min_length=1, max_length=20)
+    latitude: float
+    longitude: float
+    radius_km: float = Field(default=20, le=50)
+
+
+class TriageChatResponse(BaseModel):
+    """Assistant response for one conversational triage turn."""
+    assistant_message: str
+    should_search: bool
+    parsed_requirements: Optional[ParsedRequirements] = None
+    results: list[HospitalSearchResult] = []
+    query_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
