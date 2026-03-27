@@ -2,23 +2,23 @@
  * BroadcastPatientLog — paramedic logs patients at the scene.
  *
  * Route: /broadcast/:id/log
- * Mobile-optimized. Big severity buttons. Minimal typing.
- * Each logged patient auto-increments tag (MCI-001, MCI-002...).
+ * Mobile-optimized. Quick severity selection and minimal typing.
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
-  ArrowLeft, Plus, Check, Loader2, AlertTriangle, Radio, Users, X
+  ArrowLeft, Plus, Check, Loader2, AlertTriangle, Radio, Users, X,
+  ShieldAlert, Activity, HeartPulse, CircleDot, ClipboardList
 } from 'lucide-react';
 import api from '../lib/api';
 
 const SEVERITY_OPTIONS = [
-  { id: 'critical', label: 'Critical', emoji: '🔴', color: 'bg-red-500', border: 'border-red-500', activeBg: 'bg-red-500/20', desc: 'Life-threatening' },
-  { id: 'high',     label: 'High',     emoji: '🟠', color: 'bg-amber-500', border: 'border-amber-500', activeBg: 'bg-amber-500/20', desc: 'Serious but stable' },
-  { id: 'medium',   label: 'Medium',   emoji: '🟡', color: 'bg-yellow-500', border: 'border-yellow-500', activeBg: 'bg-yellow-500/20', desc: 'Needs care' },
-  { id: 'low',      label: 'Low',      emoji: '🟢', color: 'bg-green-500', border: 'border-green-500', activeBg: 'bg-green-500/20', desc: 'Walking wounded' },
-  { id: 'deceased',  label: 'Deceased', emoji: '⚫', color: 'bg-gray-500', border: 'border-gray-500', activeBg: 'bg-gray-500/20', desc: '' },
+  { id: 'critical', label: 'Critical', icon: ShieldAlert, tone: 'bg-red-50 text-red-600 border-red-100', dot: 'bg-red-500', desc: 'Life-threatening' },
+  { id: 'high', label: 'High', icon: AlertTriangle, tone: 'bg-amber-50 text-amber-600 border-amber-100', dot: 'bg-amber-500', desc: 'Serious but stable' },
+  { id: 'medium', label: 'Medium', icon: Activity, tone: 'bg-sky-50 text-sky-700 border-sky-100', dot: 'bg-sky-500', desc: 'Needs care soon' },
+  { id: 'low', label: 'Low', icon: HeartPulse, tone: 'bg-emerald-50 text-emerald-700 border-emerald-100', dot: 'bg-emerald-500', desc: 'Lower urgency' },
+  { id: 'deceased', label: 'Deceased', icon: CircleDot, tone: 'bg-slate-100 text-slate-600 border-slate-200', dot: 'bg-slate-500', desc: 'No signs of life' },
 ];
 
 const REQUIREMENT_OPTIONS = [
@@ -27,9 +27,16 @@ const REQUIREMENT_OPTIONS = [
 ];
 
 const REQ_LABELS = {
-  icu: 'ICU', surgical: 'Surgical', ventilator: 'Ventilator', ct_scanner: 'CT Scanner',
-  blood_bank: 'Blood Bank', xray: 'X-ray', pediatric: 'Pediatric', maternity: 'Maternity',
-  orthopedic: 'Orthopedic', oxygen: 'Oxygen',
+  icu: 'ICU',
+  surgical: 'Surgical',
+  ventilator: 'Ventilator',
+  ct_scanner: 'CT scanner',
+  blood_bank: 'Blood bank',
+  xray: 'X-ray',
+  pediatric: 'Pediatric',
+  maternity: 'Maternity',
+  orthopedic: 'Orthopedic',
+  oxygen: 'Oxygen',
 };
 
 export default function BroadcastPatientLog() {
@@ -38,28 +45,21 @@ export default function BroadcastPatientLog() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
-
-  // Form state
   const [severity, setSeverity] = useState(null);
   const [condition, setCondition] = useState('');
   const [requirements, setRequirements] = useState([]);
-
-  // Logged patients (local list for this session)
   const [logged, setLogged] = useState([]);
   const [lastTag, setLastTag] = useState(null);
   const [showSuccess, setShowSuccess] = useState(false);
-
   const conditionRef = useRef(null);
 
-  // Fetch broadcast info
   useEffect(() => {
     (async () => {
       try {
         const res = await api.get(`/api/broadcast/${id}`);
         setBroadcast(res.data.broadcast);
-        // Count existing patients
         setLogged(res.data.patients || []);
-      } catch (err) {
+      } catch {
         setError('Broadcast not found.');
       } finally {
         setLoading(false);
@@ -67,15 +67,17 @@ export default function BroadcastPatientLog() {
     })();
   }, [id]);
 
-  function toggleRequirement(req) {
-    setRequirements(prev =>
-      prev.includes(req) ? prev.filter(r => r !== req) : [...prev, req]
+  const recentPatients = useMemo(() => [...logged].reverse().slice(0, 10), [logged]);
+
+  function toggleRequirement(requirement) {
+    setRequirements((prev) =>
+      prev.includes(requirement) ? prev.filter((item) => item !== requirement) : [...prev, requirement]
     );
   }
 
   async function handleSubmit() {
     if (!severity) {
-      setError('Select a severity level.');
+      setError('Choose a severity level first.');
       return;
     }
 
@@ -89,23 +91,18 @@ export default function BroadcastPatientLog() {
         requirements,
       });
 
-      // Success — show confirmation, reset form
       setLastTag(res.data.tag_number);
       setShowSuccess(true);
-      setLogged(prev => [...prev, {
+      setLogged((prev) => [...prev, {
         tag_number: res.data.tag_number,
         severity: res.data.severity,
         condition_notes: condition.trim(),
       }]);
 
-      // Reset form
       setSeverity(null);
       setCondition('');
       setRequirements([]);
-
-      // Auto-hide success after 2 seconds
       setTimeout(() => setShowSuccess(false), 2000);
-
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to log patient.');
     } finally {
@@ -115,175 +112,277 @@ export default function BroadcastPatientLog() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center">
-        <Loader2 size={24} className="text-red-400 animate-spin" />
+      <div className="flex min-h-screen items-center justify-center bg-[#eef2f7]">
+        <div className="text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-white shadow-sm">
+            <Loader2 size={18} className="animate-spin text-slate-700" />
+          </div>
+          <p className="text-sm text-slate-500">Loading patient log...</p>
+        </div>
       </div>
     );
   }
 
   if (error && !broadcast) {
     return (
-      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center p-6">
-        <div className="text-center">
-          <AlertTriangle size={40} className="text-red-400 mx-auto mb-3" />
-          <p className="text-white mb-2">{error}</p>
-          <Link to="/" className="text-cyan-400 text-sm hover:underline">Back</Link>
+      <div className="flex min-h-screen items-center justify-center bg-[#eef2f7] p-6">
+        <div className="rounded-[28px] border border-slate-200 bg-white px-8 py-10 text-center shadow-sm">
+          <AlertTriangle size={40} className="mx-auto mb-3 text-red-500" />
+          <p className="mb-1 text-lg font-medium text-slate-900">{error}</p>
+          <Link to="/" className="mt-4 inline-block text-sm font-medium text-sky-600 hover:underline">
+            Go to Pulse Map
+          </Link>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0f1a]">
-      {/* Header */}
-      <div className="border-b border-gray-800/50 px-4 py-3 sticky top-0 bg-[#0a0f1a]/95 backdrop-blur-sm z-10">
-        <div className="max-w-lg mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link to={`/broadcast/${id}`} className="text-gray-500 hover:text-white transition-colors">
-              <ArrowLeft size={18} />
-            </Link>
-            <div>
-              <h1 className="text-white text-sm font-semibold flex items-center gap-2">
-                <Radio size={12} className="text-red-400 animate-pulse" />
-                Patient Log
-              </h1>
-              <p className="text-gray-500 text-[10px]">{broadcast?.title}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5 bg-[#151d2e] px-2.5 py-1 rounded-lg">
-            <Users size={12} className="text-cyan-400" />
-            <span className="text-white text-xs font-bold">{logged.length}</span>
-            <span className="text-gray-500 text-[10px]">logged</span>
-          </div>
-        </div>
-      </div>
+    <div className="min-h-screen bg-[#eef2f7] px-4 py-6 text-slate-900">
+      <div className="mx-auto max-w-[980px]">
+        <div className="rounded-[36px] border border-black/5 bg-[#141414] p-4 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+          <div className="rounded-[30px] bg-[#f7f8fb] p-3 sm:p-4">
+            <TopBar broadcast={broadcast} id={id} count={logged.length} />
 
-      <div className="max-w-lg mx-auto px-4 py-5">
-
-        {/* Success flash */}
-        {showSuccess && lastTag && (
-          <div className="mb-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-3 flex items-center gap-3 animate-slide-down">
-            <Check size={18} className="text-emerald-400" />
-            <div>
-              <p className="text-emerald-400 text-sm font-bold">{lastTag} logged</p>
-              <p className="text-gray-400 text-[10px]">Patient added to dispatch queue</p>
-            </div>
-          </div>
-        )}
-
-        {/* Error */}
-        {error && (
-          <div className="mb-4 bg-red-500/10 border border-red-500/30 text-red-400 text-xs px-3 py-2 rounded-lg flex items-center gap-2">
-            <AlertTriangle size={12} />
-            {error}
-            <button onClick={() => setError(null)} className="ml-auto"><X size={12} /></button>
-          </div>
-        )}
-
-        {/* Step 1: Severity — big tappable buttons */}
-        <div className="mb-5">
-          <p className="text-gray-400 text-xs mb-2 font-medium">Triage severity *</p>
-          <div className="grid grid-cols-2 gap-2">
-            {SEVERITY_OPTIONS.map(s => (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => {
-                  setSeverity(s.id);
-                  // Auto-focus condition input
-                  setTimeout(() => conditionRef.current?.focus(), 100);
-                }}
-                className={`p-3 rounded-xl border-2 transition-all text-left ${
-                  severity === s.id
-                    ? `${s.activeBg} ${s.border}`
-                    : 'bg-[#151d2e] border-gray-800/50 hover:border-gray-600'
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className="text-lg">{s.emoji}</span>
-                  <span className="text-white text-sm font-semibold">{s.label}</span>
-                </div>
-                {s.desc && <p className="text-gray-500 text-[10px]">{s.desc}</p>}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Step 2: Condition notes */}
-        <div className="mb-5">
-          <p className="text-gray-400 text-xs mb-2 font-medium">Condition</p>
-          <input
-            ref={conditionRef}
-            type="text"
-            value={condition}
-            onChange={e => setCondition(e.target.value)}
-            placeholder="e.g. Head trauma, unconscious, bleeding"
-            className="w-full bg-[#151d2e] border border-gray-700/50 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-red-500/50 transition-all"
-          />
-        </div>
-
-        {/* Step 3: Requirements — tappable chips */}
-        <div className="mb-6">
-          <p className="text-gray-400 text-xs mb-2 font-medium">Needs <span className="text-gray-600">(select all that apply)</span></p>
-          <div className="flex flex-wrap gap-1.5">
-            {REQUIREMENT_OPTIONS.map(req => (
-              <button
-                key={req}
-                type="button"
-                onClick={() => toggleRequirement(req)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
-                  requirements.includes(req)
-                    ? 'bg-red-500/20 border-red-500/30 text-red-300'
-                    : 'bg-[#151d2e] border-gray-700/50 text-gray-400 hover:border-gray-500'
-                }`}
-              >
-                {REQ_LABELS[req] || req}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Submit */}
-        <button
-          onClick={handleSubmit}
-          disabled={!severity || submitting}
-          className="w-full bg-red-500 hover:bg-red-600 disabled:bg-gray-700 disabled:text-gray-500 text-white text-base font-semibold py-4 rounded-xl transition-all flex items-center justify-center gap-2"
-        >
-          {submitting ? (
-            <><Loader2 size={18} className="animate-spin" /> Logging...</>
-          ) : (
-            <><Plus size={18} /> Log Patient</>
-          )}
-        </button>
-
-        {/* Recent logged patients */}
-        {logged.length > 0 && (
-          <div className="mt-6">
-            <p className="text-gray-500 text-[10px] mb-2">Recently logged ({logged.length})</p>
-            <div className="space-y-1 max-h-48 overflow-y-auto">
-              {[...logged].reverse().slice(0, 10).map((p, i) => {
-                const sev = SEVERITY_OPTIONS.find(s => s.id === p.severity);
-                return (
-                  <div key={i} className="flex items-center gap-2 bg-[#151d2e] rounded-lg px-3 py-2">
-                    <span className={`w-2 h-2 rounded-full ${sev?.color || 'bg-gray-500'}`} />
-                    <span className="text-white text-xs font-mono font-bold">{p.tag_number}</span>
-                    <span className="text-gray-500 text-[10px] truncate flex-1">{p.condition_notes || 'No notes'}</span>
-                    <Check size={12} className="text-emerald-400 flex-shrink-0" />
+            <div className="mt-4 space-y-4">
+              <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Patient log</p>
+                    <h1 className="mt-2 text-[1.7rem] font-semibold tracking-tight text-slate-950">Add patients from the scene</h1>
+                    <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                      Capture severity, short notes, and care needs quickly so the command center can route patients faster.
+                    </p>
                   </div>
-                );
-              })}
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <HeaderInfoCard
+                      icon={Users}
+                      label="Logged"
+                      value={logged.length}
+                      sub="Patients added to this incident"
+                    />
+                    <HeaderInfoCard
+                      icon={ClipboardList}
+                      label="Incident"
+                      value={broadcast?.title || 'Broadcast'}
+                      sub="Shared with the command center"
+                    />
+                  </div>
+                </div>
+              </section>
+
+              {showSuccess && lastTag ? (
+                <section className="rounded-[24px] border border-emerald-100 bg-emerald-50 px-5 py-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-emerald-600 shadow-sm">
+                      <Check size={18} />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-emerald-800">{lastTag} logged</p>
+                      <p className="text-sm text-emerald-700">Patient added to the broadcast queue.</p>
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+
+              {error ? (
+                <section className="rounded-[24px] border border-red-100 bg-red-50 px-5 py-4">
+                  <div className="flex items-center gap-3">
+                    <AlertTriangle size={16} className="text-red-600" />
+                    <p className="text-sm font-medium text-red-700">{error}</p>
+                    <button type="button" onClick={() => setError(null)} className="ml-auto text-red-500 transition hover:text-red-700">
+                      <X size={14} />
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
+              <div className="grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+                <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                  <div className="border-b border-slate-100 pb-4">
+                    <p className="text-base font-semibold text-slate-950">New patient</p>
+                    <p className="mt-1 text-sm text-slate-500">Choose severity first, then add any notes or care needs.</p>
+                  </div>
+
+                  <div className="mt-5 space-y-5">
+                    <div>
+                      <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Severity</p>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {SEVERITY_OPTIONS.map((option) => {
+                          const Icon = option.icon;
+                          const active = severity === option.id;
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                setSeverity(option.id);
+                                setTimeout(() => conditionRef.current?.focus(), 100);
+                              }}
+                              className={`rounded-[22px] border px-4 py-4 text-left transition ${
+                                active ? `${option.tone} shadow-sm` : 'border-slate-200 bg-slate-50 hover:bg-white'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${active ? 'bg-white' : 'bg-white/70'} shadow-sm`}>
+                                  <Icon size={16} />
+                                </div>
+                                <div>
+                                  <p className="text-sm font-semibold text-slate-950">{option.label}</p>
+                                  <p className="mt-1 text-xs text-slate-500">{option.desc}</p>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="condition" className="mb-3 block text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                        Condition notes
+                      </label>
+                      <input
+                        id="condition"
+                        ref={conditionRef}
+                        type="text"
+                        value={condition}
+                        onChange={(e) => setCondition(e.target.value)}
+                        placeholder="Head injury, bleeding, difficulty breathing..."
+                        className="w-full rounded-[20px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-300 focus:bg-white focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Care needs</p>
+                      <div className="flex flex-wrap gap-2">
+                        {REQUIREMENT_OPTIONS.map((requirement) => (
+                          <button
+                            key={requirement}
+                            type="button"
+                            onClick={() => toggleRequirement(requirement)}
+                            className={`rounded-full border px-3 py-2 text-xs font-medium transition ${
+                              requirements.includes(requirement)
+                                ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                : 'border-slate-200 bg-slate-50 text-slate-500 hover:bg-white hover:text-slate-700'
+                            }`}
+                          >
+                            {REQ_LABELS[requirement] || requirement}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleSubmit}
+                      disabled={!severity || submitting}
+                      className="inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-full bg-slate-950 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:bg-slate-300"
+                    >
+                      {submitting ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+                      {submitting ? 'Logging patient...' : 'Log patient'}
+                    </button>
+                  </div>
+                </section>
+
+                <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                  <div className="border-b border-slate-100 pb-4">
+                    <div className="flex items-center gap-2">
+                      <p className="text-base font-semibold text-slate-950">Recent entries</p>
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600">
+                        {recentPatients.length}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-slate-500">The latest patients logged from the field.</p>
+                  </div>
+
+                  {recentPatients.length === 0 ? (
+                    <div className="py-16 text-center text-sm text-slate-500">No patients logged yet.</div>
+                  ) : (
+                    <div className="mt-5 max-h-[560px] space-y-3 overflow-y-auto pr-1">
+                      {recentPatients.map((patient, index) => {
+                        const severityMeta = SEVERITY_OPTIONS.find((option) => option.id === patient.severity) || SEVERITY_OPTIONS[2];
+                        return (
+                          <RecentLogCard key={`${patient.tag_number}-${index}`} patient={patient} severityMeta={severityMeta} />
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </div>
             </div>
           </div>
-        )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TopBar({ broadcast, id, count }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-wrap items-center gap-3">
+        <Link to={`/broadcast/${id}`} className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
+          <ArrowLeft size={16} />
+        </Link>
+        <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
+          <Radio size={13} className="text-red-400" />
+          Broadcast log
+        </div>
       </div>
 
-      <style>{`
-        @keyframes slide-down {
-          from { opacity: 0; transform: translateY(-10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .animate-slide-down { animation: slide-down 0.3s ease-out; }
-      `}</style>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="rounded-full bg-white/[0.06] px-4 py-2 text-sm text-slate-200">
+          {count} logged
+        </div>
+        <div className="text-right text-xs text-slate-400">
+          <p className="font-medium text-slate-300">{broadcast?.title}</p>
+          <p className="mt-0.5">Shared with dispatch and hospitals</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HeaderInfoCard({ icon, label, value, sub }) {
+  const IconComponent = icon;
+
+  return (
+    <div className="min-w-[180px] rounded-[22px] border border-slate-100 bg-slate-50/80 px-4 py-3">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-slate-700 shadow-sm">
+          <IconComponent size={16} />
+        </div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
+          <p className="mt-1 truncate text-sm font-semibold text-slate-950">{value}</p>
+          <p className="mt-1 text-xs text-slate-500">{sub}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RecentLogCard({ patient, severityMeta }) {
+  const Icon = severityMeta.icon;
+
+  return (
+    <div className="rounded-[22px] border border-slate-100 bg-white px-4 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)]">
+      <div className="flex items-start gap-3">
+        <div className={`flex h-10 w-10 items-center justify-center rounded-2xl border ${severityMeta.tone}`}>
+          <Icon size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="font-mono text-sm font-semibold text-slate-950">{patient.tag_number}</p>
+            <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${severityMeta.tone}`}>
+              {severityMeta.label}
+            </span>
+          </div>
+          <p className="mt-2 text-sm leading-6 text-slate-500">{patient.condition_notes || 'No notes added.'}</p>
+        </div>
+      </div>
     </div>
   );
 }

@@ -6,8 +6,6 @@ import HospitalMarker from './HospitalMarker';
 import HospitalCard from './HospitalCard';
 import SearchPanel from './SearchPanel';
 import WelcomeCard from './WelcomeCard';
-import TimeSlider from './TimeSlider';
-import MapLegend from './MapLegend';
 import './popup-overrides.css';
 
 const LAGOS = { latitude: 6.5244, longitude: 3.3792 };
@@ -15,9 +13,7 @@ const LAGOS = { latitude: 6.5244, longitude: 3.3792 };
 export default function PulseMap() {
   const { hospitals, loading, error } = useHospitals();
   const [selected, setSelected] = useState(null);
-  const [predictions, setPredictions] = useState(null);
   const [searchResults, setSearchResults] = useState(null);
-  const [showWelcome, setShowWelcome] = useState(true);
   const mapRef = useRef(null);
 
   // ── Route tracking state ───────────────────────────
@@ -67,55 +63,8 @@ export default function PulseMap() {
     });
   }, []);
 
-  // ── Start tracking when SearchPanel activates it ───
-  const handleStartTracking = useCallback((hospitalData) => {
-    // hospitalData = { lat, lng, name, address }
-    setTracking(hospitalData);
-
-    // Get user's position + start watching
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const uPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        setUserPosition(uPos);
-
-        // Fetch route from Mapbox Directions API
-        fetchRoute(uPos, hospitalData);
-
-        // Fit map to show both points
-        const bounds = [
-          [Math.min(uPos.lng, hospitalData.lng) - 0.01, Math.min(uPos.lat, hospitalData.lat) - 0.01],
-          [Math.max(uPos.lng, hospitalData.lng) + 0.01, Math.max(uPos.lat, hospitalData.lat) + 0.01],
-        ];
-        mapRef.current?.fitBounds(bounds, { padding: { top: 80, bottom: 80, left: 420, right: 80 }, duration: 1200 });
-      },
-      () => {
-        // GPS failed — use Lagos center as fallback
-        const fallback = { lat: 6.5244, lng: 3.3792 };
-        setUserPosition(fallback);
-        fetchRoute(fallback, hospitalData);
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
-
-    // Watch position for live updates
-    watchRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        setUserPosition({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      },
-      () => {},
-      { enableHighAccuracy: true, maximumAge: 5000 }
-    );
-  }, []);
-
-  // Cleanup watch on unmount
-  useEffect(() => {
-    return () => {
-      if (watchRef.current) navigator.geolocation.clearWatch(watchRef.current);
-    };
-  }, []);
-
   // ── Fetch route from Mapbox ────────────────────────
-  async function fetchRoute(from, to) {
+  const fetchRoute = useCallback(async (from, to) => {
     const token = import.meta.env.VITE_MAPBOX_TOKEN;
     try {
       const res = await fetch(
@@ -137,7 +86,47 @@ export default function PulseMap() {
     } catch (err) {
       console.error('Route fetch failed:', err);
     }
-  }
+  }, []);
+
+  // ── Start tracking when SearchPanel activates it ───
+  const handleStartTracking = useCallback((hospitalData) => {
+    setTracking(hospitalData);
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const uPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setUserPosition(uPos);
+        fetchRoute(uPos, hospitalData);
+
+        const bounds = [
+          [Math.min(uPos.lng, hospitalData.lng) - 0.01, Math.min(uPos.lat, hospitalData.lat) - 0.01],
+          [Math.max(uPos.lng, hospitalData.lng) + 0.01, Math.max(uPos.lat, hospitalData.lat) + 0.01],
+        ];
+        mapRef.current?.fitBounds(bounds, { padding: { top: 110, bottom: 110, left: 520, right: 110 }, duration: 1200 });
+      },
+      () => {
+        const fallback = { lat: 6.5244, lng: 3.3792 };
+        setUserPosition(fallback);
+        fetchRoute(fallback, hospitalData);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+
+    watchRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        setUserPosition({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      },
+      () => undefined,
+      { enableHighAccuracy: true, maximumAge: 5000 }
+    );
+  }, [fetchRoute]);
+
+  // Cleanup watch on unmount
+  useEffect(() => {
+    return () => {
+      if (watchRef.current) navigator.geolocation.clearWatch(watchRef.current);
+    };
+  }, []);
 
   // Determine which hospitals are highlighted by search
   const highlightedIds = searchResults
@@ -174,7 +163,7 @@ export default function PulseMap() {
   };
 
   return (
-    <div className="w-full h-screen flex relative overflow-hidden">
+    <div className="relative flex h-screen w-full overflow-hidden bg-[#0d1522] p-5">
       {/* ── Left Panel ─────────────────────────────────── */}
       <SearchPanel
         onResults={handleSearchResults}
@@ -186,24 +175,24 @@ export default function PulseMap() {
       />
 
       {/* ── Map ────────────────────────────────────────── */}
-      <div className="flex-1 relative">
+      <div className="relative ml-5 flex-1 overflow-hidden rounded-[2rem] border border-white/[0.06] bg-[#0b1420] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
         {/* Loading */}
         {loading && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#0a0f1a]/90">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#050914]/80 backdrop-blur-sm">
             <div className="text-center">
               <div className="relative w-12 h-12 mx-auto mb-4">
-                <div className="absolute inset-0 rounded-full border-2 border-cyan-400/30" />
-                <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-cyan-400 animate-spin" />
-                <div className="absolute inset-2 rounded-full bg-cyan-400/10 animate-pulse" />
+                <div className="absolute inset-0 rounded-full border-2 border-sky-400/30" />
+                <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-sky-400 animate-spin" />
+                <div className="absolute inset-2 rounded-full bg-sky-400/10 animate-pulse" />
               </div>
-              <p className="text-cyan-300/80 text-sm font-light tracking-wide">Loading hospitals...</p>
+              <p className="text-sm tracking-wide text-sky-100/80">Loading nearby hospitals...</p>
             </div>
           </div>
         )}
 
         {/* Error */}
         {error && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-red-500/90 text-white px-5 py-2.5 rounded-lg text-sm backdrop-blur-sm">
+          <div className="absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full bg-red-600 px-5 py-2.5 text-sm text-white shadow-lg">
             {error}
           </div>
         )}
@@ -333,7 +322,7 @@ export default function PulseMap() {
 
         {/* Hospital detail card */}
         {selected && (
-          <div className="absolute top-5 right-5 z-20 animate-slide-in">
+              <div className="absolute top-6 right-6 z-20 animate-slide-in">
             <HospitalCard hospital={selected} onClose={() => setSelected(null)} />
           </div>
         )}
@@ -353,59 +342,61 @@ export default function PulseMap() {
         `}</style>
 
         {/* Route info bar */}
-        {routeGeoJSON && tracking && (
-          <div className="absolute top-5 left-1/2 -translate-x-1/2 z-10 bg-[#0d1320]/90 backdrop-blur-sm border border-cyan-500/30 rounded-xl px-5 py-3 flex items-center gap-4">
+        {/* {routeGeoJSON && tracking && (
+          <div className="absolute left-1/2 top-6 z-10 flex -translate-x-1/2 items-center gap-4 rounded-[1.4rem] border border-sky-500/20 bg-[#0b1422]/92 px-5 py-3 shadow-lg backdrop-blur-sm">
             <div className="flex items-center gap-2">
               <div style={{ width: 10, height: 10, borderRadius: '50%', backgroundColor: '#3b82f6', border: '2px solid white' }} />
-              <span className="text-gray-400 text-xs">You</span>
+              <span className="text-xs text-slate-400">You</span>
             </div>
-            <div className="text-gray-600 text-xs">→</div>
+            <div className="text-xs text-slate-600">→</div>
             <div className="flex items-center gap-2">
               <div style={{ width: 10, height: 10, borderRadius: '50%', backgroundColor: '#10b981' }} />
-              <span className="text-white text-xs font-medium truncate max-w-[150px]">{tracking.name}</span>
+              <span className="max-w-[150px] truncate text-xs font-medium text-white">{tracking.name}</span>
             </div>
-            <div className="border-l border-gray-700 pl-4 flex items-center gap-3">
-              <span className="text-cyan-400 text-sm font-bold">{routeGeoJSON.properties.duration} min</span>
-              <span className="text-gray-500 text-xs">{routeGeoJSON.properties.distance} km</span>
+            <div className="flex items-center gap-3 border-l border-white/[0.08] pl-4">
+              <span className="text-sm font-bold text-sky-300">{routeGeoJSON.properties.duration} min</span>
+              <span className="text-xs text-slate-400">{routeGeoJSON.properties.distance} km</span>
             </div>
           </div>
-        )}
+        )} */}
 
         {/* Title — hide when tracking */}
         {!tracking && (
-          <div className="absolute top-5 left-5 z-10 pointer-events-none">
-            <h1 className="text-white text-xl font-bold tracking-tight flex items-center gap-2">
-              <span className="w-2.5 h-2.5 bg-cyan-400 rounded-full animate-pulse" />
-              BedSignal
-              <span className="text-cyan-400 font-light">Pulse</span>
+          <div className="pointer-events-none absolute left-6 top-6 z-10">
+            <div className="inline-flex rounded-full border border-white/[0.08] bg-[#0b1422]/88 px-3 py-1.5 shadow-sm backdrop-blur-sm">
+              <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-sky-300/80">Live map</p>
+            </div>
+            <h1 className="mt-3 flex items-center gap-2 text-2xl font-semibold tracking-tight text-white">
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
+              BedSignal Pulse
             </h1>
-            <p className="text-gray-500 text-[10px] mt-0.5 tracking-wider uppercase">
-              Real-time hospital bed availability · Lagos
+            <p className="mt-1 text-xs tracking-wide text-slate-400">
+              Real-time hospital availability around Lagos
             </p>
           </div>
         )}
 
-        {!selected && !tracking && <MapLegend />}
+        {/* {!selected && !tracking && <MapLegend />} */}
 
-        <TimeSlider onPredictionsChange={setPredictions} />
+        {/* <TimeSlider onPredictionsChange={() => undefined} /> */}
 
-        <div className="absolute bottom-6 left-5 z-10 flex items-center gap-2">
-          <div className="bg-[#0d1320]/80 backdrop-blur-sm text-gray-400 px-3 py-1.5 rounded-full text-xs flex items-center gap-2 border border-gray-800/50">
-            <span className="w-1.5 h-1.5 bg-cyan-400 rounded-full" />
+        <div className="absolute bottom-6 left-6 z-10 flex items-center gap-2">
+          <div className="flex items-center gap-2 rounded-full border border-white/[0.08] bg-[#0b1422]/88 px-3 py-1.5 text-xs text-slate-300 shadow-sm backdrop-blur-sm">
+            <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
             {hospitals.length} hospitals live
           </div>
           <a
             href="/broadcast"
-            className="bg-red-500/10 backdrop-blur-sm text-red-400 px-3 py-1.5 rounded-full text-xs flex items-center gap-1.5 border border-red-500/30 hover:bg-red-500/20 transition-all"
+            className="flex items-center gap-1.5 rounded-full border border-red-500/20 bg-[#0b1422]/88 px-3 py-1.5 text-xs text-red-300 shadow-sm backdrop-blur-sm transition-all hover:bg-red-500/10"
           >
-            <span className="w-1.5 h-1.5 bg-red-400 rounded-full animate-pulse" />
+            <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
             Broadcasts
           </a>
         </div>
 
-        {showWelcome && !loading && !tracking && (
+        {/* {showWelcome && !loading && !tracking && (
           <WelcomeCard onDismiss={() => setShowWelcome(false)} />
-        )}
+        )} */}
       </div>
     </div>
   );

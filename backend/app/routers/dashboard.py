@@ -16,6 +16,7 @@ from typing import Optional
 from app.database import supabase
 from app.services.search_engine import extract_equipment, _parse_location
 from app.services.handshake_mgr import accept_handshake, decline_handshake
+from app.services.transport_reroute import reroute_transport_request
 from app.services.whatsapp import send_text, send_buttons
 
 router = APIRouter(prefix="/hospitals/dashboard", tags=["Hospital Dashboard"])
@@ -454,9 +455,29 @@ async def override_handshake_web(slug: str, handshake_id: str, request: Override
     if not result:
         raise HTTPException(status_code=400, detail="Failed to override handshake")
 
-    # Auto-reroute the displaced patient
-    from app.services.router import reroute_displaced_patient
-    reroute_count = await reroute_displaced_patient(result, hospital["name"])
+    reroute_result = None
+    has_active_ambulance = False
+    transport_req = (
+        supabase.table("transport_requests")
+        .select("id, assignment_id, status")
+        .eq("handshake_id", handshake_id)
+        .execute()
+    ).data
+    if transport_req:
+        tr = transport_req[0]
+        if tr.get("assignment_id") and tr["status"] in ("dispatch_accepted", "rerouted"):
+            has_active_ambulance = True
+            try:
+                reroute_result = await reroute_transport_request(tr["id"])
+                print(f"   🔄 Ambulance rerouted: {reroute_result.get('new_hospital', {}).get('name', 'unknown')}")
+            except Exception as e:
+                print(f"   ⚠️ Ambulance reroute failed: {e}")
+                has_active_ambulance = False
+
+    reroute_count = 0
+    if not has_active_ambulance:
+        from app.services.router import reroute_displaced_patient
+        reroute_count = await reroute_displaced_patient(result, hospital["name"])
 
     return {
         "status": "overridden",
@@ -464,6 +485,7 @@ async def override_handshake_web(slug: str, handshake_id: str, request: Override
         "walkin_urgency": request.walkin_urgency,
         "held_urgency": result.get("_held_urgency", "medium"),
         "reroute_results_count": reroute_count,
+        "ambulance_rerouted": reroute_result,
     }
 
 

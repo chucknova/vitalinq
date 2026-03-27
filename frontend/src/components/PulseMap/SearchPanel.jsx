@@ -12,7 +12,8 @@ import { useState, useRef, useEffect } from 'react';
 import {
   Brain, MapPin, ChevronLeft, ChevronRight, X,
   Loader2, AlertTriangle, ArrowLeft, Phone, User, FileText,
-  CheckCircle2, Clock, XCircle, Navigation, Copy, Check
+  CheckCircle2, Clock, Navigation, Copy, Check, Ambulance, LocateFixed, Building2,
+  Bell, BedDouble, MapPinned, RefreshCcw, ShieldAlert
 } from 'lucide-react';
 import api from '../../lib/api';
 import useHandshake from '../../hooks/useHandshake';
@@ -28,9 +29,24 @@ const STEPS = {
 const INITIAL_CHAT_MESSAGES = [
   {
     role: 'assistant',
-    content: 'Tell me what happened in your own words. I’ll ask follow-up questions if anything is unclear, then I can find and reserve a bed near you.',
+    content: 'Tell me what’s going on by describing the emergency, and I’ll help you find the right care nearby.',
   },
 ];
+
+function formatConditionLabel(value) {
+  return value?.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()) || 'Care match';
+}
+
+function formatUrgencyLabel(value) {
+  return (
+    {
+      critical: 'Needs urgent help',
+      high: 'Needs quick care',
+      medium: 'Needs care soon',
+      low: 'May be okay for a clinic',
+    }[value] || 'Care level'
+  );
+}
 
 export default function SearchPanel({ onResults, onClear, searchResults, hospitals, onHospitalSelect, onStartTracking }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -55,9 +71,29 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [rerouteResults, setRerouteResults] = useState(null);
   const [rerouteLoading, setRerouteLoading] = useState(false);
   const [transportLoading, setTransportLoading] = useState(false);
+  const [transportId, setTransportId] = useState(null);
+  const [transportData, setTransportData] = useState(null);
 
   // Live status polling
-  const { handshake, loading: handshakeLoading, countdown } = useHandshake(handshakeId);
+  const { handshake, countdown } = useHandshake(handshakeId);
+  const hasAmbulanceReroute = handshake?.status === 'overridden' && transportData?._rerouted;
+
+  // Poll transport status when we have a transport request
+  useEffect(() => {
+    if (!transportId) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await api.get(`/api/transport/${transportId}`);
+        if (active) setTransportData(res.data);
+      } catch {
+        // Ignore transport polling errors and try again on the next interval.
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => { active = false; clearInterval(interval); };
+  }, [transportId]);
 
   // Auto-search for alternatives when overridden
   const prevStatus = useRef(null);
@@ -74,7 +110,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
             );
             lat = pos.coords.latitude;
             lng = pos.coords.longitude;
-          } catch (_) {}
+          } catch {
+            // Fall back to the default Lagos center when location is unavailable.
+          }
 
           const res = await api.post('/api/search/nearby', {
             latitude: lat,
@@ -96,7 +134,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
       })();
     }
     prevStatus.current = handshake?.status;
-  }, [handshake?.status]);
+  }, [handshake?.status, selectedResult?.hospital_id]);
 
   // Start map tracking when bed is confirmed
   const positionIntervalRef = useRef(null);
@@ -120,9 +158,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
               api.patch(`/api/handshakes/${handshakeId}/position`, {
                 latitude: pos.coords.latitude,
                 longitude: pos.coords.longitude,
-              }).catch(() => {}); // silent fail
+              }).catch(() => undefined);
             },
-            () => {},
+            () => undefined,
             { enableHighAccuracy: false, timeout: 5000 }
           );
         }
@@ -142,7 +180,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         clearInterval(positionIntervalRef.current);
       }
     };
-  }, [handshake?.status === 'accepted']);
+  }, [handshake?.status, handshakeId, hospitals, onStartTracking, selectedResult]);
 
   function summarizeConversation(messages) {
     return messages
@@ -169,7 +207,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
       );
       latitude = pos.coords.latitude;
       longitude = pos.coords.longitude;
-    } catch (_) {}
+    } catch {
+      // Fall back to the default Lagos center when location is unavailable.
+    }
 
     return { latitude, longitude };
   }
@@ -221,7 +261,8 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         setPatientCondition((current) => current || transcript);
         handleTriageOutcome(res.data);
       }
-    } catch (err) {
+    } catch (error) {
+      console.error('Chat search failed:', error);
       setError('Search failed. Please try again.');
     } finally {
       setLoading(false);
@@ -244,7 +285,8 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
       onResults(res.data.results);
       setStep(STEPS.RESULTS);
-    } catch (err) {
+    } catch (error) {
+      console.error('Quick search failed:', error);
       setError('Search failed. Please try again.');
     } finally {
       setLoading(false);
@@ -295,7 +337,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
             holdMin = Math.max(20, Math.min(holdMin, 180));
           }
         }
-      } catch (_) {
+      } catch {
         // GPS or Mapbox failed — use default 45 min
       }
 
@@ -312,7 +354,8 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
       setHandshakeId(res.data.handshake_id);
       setTransferCode(res.data.transfer_code);
       setStep(STEPS.TRACKING);
-    } catch (err) {
+    } catch (error) {
+      console.error('Bed booking failed:', error);
       setError('Failed to create bed reservation. Please try again.');
     } finally {
       setLoading(false);
@@ -356,13 +399,16 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
     try {
       const { latitude, longitude } = await getCurrentLocation(10000);
-      await api.post(`/api/handshakes/${handshakeId}/transport`, {
+      const res = await api.post('/api/transport/request', {
+        handshake_id: handshakeId,
         pickup_lat: latitude,
         pickup_lng: longitude,
         pickup_address: 'Patient live location',
       });
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to request transport.');
+      setTransportId(res.data.transport_id);
+    } catch (error) {
+      console.error('Transport request failed:', error);
+      setError(error.response?.data?.detail || 'Failed to request transport.');
     } finally {
       setTransportLoading(false);
     }
@@ -375,7 +421,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         onClick={() => setCollapsed(false)}
         aria-label="Expand search panel"
         aria-expanded={false}
-        className="absolute top-5 left-5 z-30 w-11 h-11 bg-[#08090f]/95 backdrop-blur-md border border-white/10 text-gray-300 flex items-center justify-center rounded-2xl hover:bg-[#0f1420] hover:border-sky-500/40 hover:text-white transition-all duration-200 shadow-xl shadow-black/50 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+        className="absolute top-6 left-6 z-30 flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-[#0b1220]/95 text-slate-300 shadow-xl shadow-black/40 transition-all duration-200 hover:border-sky-500/30 hover:text-white focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060b14]"
       >
         <ChevronRight size={18} />
       </button>
@@ -384,7 +430,6 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
   // Step order arrays
   const isLowUrgency = step === STEPS.LOW_URGENCY;
-  const transportRequest = handshake?.parsed_requirements?.transport || null;
   const stepLabels = isLowUrgency
     ? ['Search', 'Assessment', 'Clinics']
     : ['Search', 'Select', 'Details', 'Track'];
@@ -394,10 +439,10 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const currentStepIdx = stepOrder.indexOf(step);
 
   return (
-    <div className="w-[390px] h-full bg-[#08090f] border-r border-white/[0.06] flex flex-col z-20 relative shadow-2xl shadow-black/60">
+    <aside className="z-20 flex h-full w-[500px] flex-col rounded-2xl border border-white/[0.06] bg-[#08111d] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
 
       {/* ── Header ──────────────────────────────────────── */}
-      <div className="px-5 pt-5 pb-3 flex items-center justify-between">
+      <div className="flex items-start justify-between px-7 pt-7 pb-4">
         <div className="flex items-center gap-3">
           {step !== STEPS.SEARCH && step !== STEPS.TRACKING && (
             <button
@@ -405,36 +450,36 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                 if (step === STEPS.RESULTS) { setStep(STEPS.SEARCH); onClear(); }
                 else if (step === STEPS.LOW_URGENCY) { setStep(STEPS.SEARCH); }
                 else if (step === STEPS.PATIENT) setStep(STEPS.RESULTS);
-                else if (step === STEPS.TRACKING) {} // Can't go back from tracking
               }}
-              className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-all focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition-all hover:bg-white/5 hover:text-white focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
               aria-label="Go back"
             >
               <ArrowLeft size={16} />
             </button>
           )}
           <div>
-            <h2 className="text-white text-[15px] font-semibold tracking-tight">
-              {step === STEPS.SEARCH && 'Find a hospital'}
-              {step === STEPS.RESULTS && 'Choose a hospital'}
-              {step === STEPS.LOW_URGENCY && 'Non-emergency care'}
-              {step === STEPS.PATIENT && 'Patient details'}
-              {step === STEPS.TRACKING && 'Bed reservation'}
+            <h2 className="text-[1.45rem] font-semibold tracking-tight text-white">
+              {step === STEPS.SEARCH && 'Find care nearby'}
+              {step === STEPS.RESULTS && 'Choose a place'}
+              {step === STEPS.LOW_URGENCY && 'Clinic options'}
+              {step === STEPS.PATIENT && 'A few details'}
+              {step === STEPS.TRACKING && 'Your booking'}
             </h2>
-            <p className="text-gray-500 text-xs mt-0.5 leading-snug">
-              {step === STEPS.SEARCH && 'Describe the emergency or search nearby'}
-              {step === STEPS.RESULTS && `${searchResults?.length || 0} hospitals found`}
-              {step === STEPS.LOW_URGENCY && 'We recommend a clinic for your situation'}
-              {step === STEPS.PATIENT && selectedResult?.name}
-              {step === STEPS.TRACKING && (transferCode ? `Code: ${transferCode}` : 'Creating reservation...')}
-            </p>
+            {step !== STEPS.SEARCH && (
+              <p className="mt-1 max-w-[28rem] text-sm leading-snug text-slate-400">
+                {step === STEPS.RESULTS && `${searchResults?.length || 0} place${searchResults?.length === 1 ? '' : 's'} found`}
+                {step === STEPS.LOW_URGENCY && 'A clinic may be a better fit right now.'}
+                {step === STEPS.PATIENT && selectedResult?.name}
+                {step === STEPS.TRACKING && (transferCode ? `Booking code: ${transferCode}` : 'Setting things up...')}
+              </p>
+            )}
           </div>
         </div>
         <button
           onClick={() => setCollapsed(true)}
           aria-label="Collapse search panel"
           aria-expanded={true}
-          className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-300 hover:bg-white/5 rounded-lg transition-all focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+          className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition-all hover:bg-white/5 hover:text-slate-200 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
         >
           <ChevronLeft size={18} />
         </button>
@@ -442,7 +487,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
       {/* ── Step indicator ──────────────────────────────── */}
       <nav
-        className="px-5 pb-4"
+        className="px-7 pb-5"
         aria-label="Booking progress"
         role="progressbar"
         aria-valuenow={currentStepIdx + 1}
@@ -450,27 +495,27 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         aria-valuemax={stepLabels.length}
         aria-label={`Step ${currentStepIdx + 1} of ${stepLabels.length}: ${stepLabels[currentStepIdx]}`}
       >
-        <div className="flex gap-1.5">
+        <div className="flex gap-2">
           {stepLabels.map((label, i) => {
             const isActive = i <= currentStepIdx;
             const isCurrent = i === currentStepIdx;
             return (
               <div key={label} className="flex-1 flex flex-col gap-1">
                 <div
-                  className={`h-2 rounded-full transition-all duration-500 ${
+                  className={`h-2.5 rounded-full transition-all duration-500 ${
                     isActive
                       ? isLowUrgency
                         ? 'bg-amber-500'
                         : isCurrent
-                          ? 'bg-sky-400 shadow-sm shadow-sky-500/50'
-                          : 'bg-sky-500/70'
-                      : 'bg-white/[0.06]'
+                          ? 'bg-sky-400 shadow-sm shadow-sky-500/40'
+                          : 'bg-sky-500/60'
+                      : 'bg-white/[0.08]'
                   }`}
                 />
-                <p className={`text-[10px] font-medium transition-colors ${
+                <p className={`text-[11px] font-medium transition-colors ${
                   isActive
-                    ? isLowUrgency ? 'text-amber-400' : 'text-sky-400'
-                    : 'text-gray-700'
+                    ? isLowUrgency ? 'text-amber-300' : 'text-sky-300'
+                    : 'text-slate-600'
                 }`}>{label}</p>
               </div>
             );
@@ -482,14 +527,14 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
       {error && (
         <div
           role="alert"
-          className="mx-5 mb-4 bg-red-500/10 border border-red-500/25 text-red-300 text-sm px-4 py-3 rounded-xl flex items-center gap-2.5"
+          className="mx-6 mb-4 flex items-center gap-2.5 rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-300"
         >
           <AlertTriangle size={14} className="flex-shrink-0" />
           <span className="flex-1">{error}</span>
           <button
             onClick={() => setError(null)}
             aria-label="Dismiss error"
-            className="w-6 h-6 flex items-center justify-center hover:bg-red-500/20 rounded transition-colors focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-1 focus-visible:ring-offset-[#08090f]"
+            className="flex h-7 w-7 items-center justify-center rounded-lg transition-colors hover:bg-red-500/10 focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-1 focus-visible:ring-offset-[#070d17]"
           >
             <X size={12} />
           </button>
@@ -498,63 +543,64 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
       {/* ── STEP 1: Search ──────────────────────────────── */}
       {step === STEPS.SEARCH && (
-        <section aria-label="Search for hospitals" className="px-5 flex-1 flex flex-col">
+        <section aria-label="Search for hospitals" className="flex flex-1 flex-col px-7 pb-7 min-h-0">
           {/* Mode toggle — segmented control */}
           <div
             role="group"
             aria-label="Search mode"
-            className="flex bg-white/[0.04] border border-white/[0.07] rounded-2xl p-1 mb-5"
+            className="mb-5 grid grid-cols-2 rounded-xl border border-white/[0.08] bg-white/[0.04] p-1"
           >
             <button
               onClick={() => setMode('triage')}
               aria-pressed={mode === 'triage'}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#08090f] ${
+              className={`flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-medium transition-all duration-200 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#fcfcf8] ${
                 mode === 'triage'
                   ? 'bg-sky-500 text-white shadow-lg shadow-sky-500/25'
-                  : 'text-gray-500 hover:text-gray-300'
+                  : 'text-slate-400 hover:text-white'
               }`}
             >
               <Brain size={14} />
-              Smart Triage
+              Tell us what happened
             </button>
             <button
               onClick={() => setMode('quick')}
               aria-pressed={mode === 'quick'}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#08090f] ${
+              className={`flex items-center justify-center gap-2 rounded-lg py-2.5 text-sm font-medium transition-all duration-200 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#fcfcf8] ${
                 mode === 'quick'
                   ? 'bg-sky-500 text-white shadow-lg shadow-sky-500/25'
-                  : 'text-gray-500 hover:text-gray-300'
+                  : 'text-slate-400 hover:text-white'
               }`}
             >
               <MapPin size={14} />
-              Nearby
+              Find nearby now
             </button>
           </div>
 
           {mode === 'triage' ? (
-            <div className="flex flex-1 flex-col min-h-0">
-              <div className="mb-3 rounded-2xl border border-white/[0.07] bg-white/[0.03] p-3">
-                <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-[#0c1626]">
+              <div className="border-b border-white/[0.06] px-6 py-5">
+                <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="text-gray-300 text-sm font-medium">AI triage chat</p>
-                    <p className="text-gray-600 text-[11px] mt-1">Freeform like WhatsApp. The bot asks only when it needs one more detail.</p>
+                    <p className="text-base font-semibold text-white">Vitalinq Care assistant</p>
                   </div>
-                  <span className="rounded-full bg-sky-500/10 px-2.5 py-1 text-[11px] font-semibold text-sky-300">
-                    Live
+                  <span className="rounded-md bg-sky-500/10 px-2 py-1 text-[11px] font-semibold text-sky-300">
+                    Ready
                   </span>
                 </div>
+              </div>
 
-                <div className="max-h-[320px] overflow-y-auto space-y-3 pr-1">
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+                <div className="mx-auto flex max-w-[420px] flex-col gap-4">
                   {chatMessages.map((message, idx) => (
                     <div
                       key={`${message.role}-${idx}`}
                       className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
                     >
                       <div
-                        className={`max-w-[85%] rounded-2xl px-3.5 py-3 text-sm leading-relaxed ${
+                        className={`max-w-[92%] rounded-xl px-4 py-3 text-sm leading-7 shadow-sm ${
                           message.role === 'user'
-                            ? 'bg-sky-500 text-white rounded-br-md'
-                            : 'bg-white/[0.05] border border-white/[0.08] text-gray-200 rounded-bl-md'
+                            ? 'rounded-br-sm bg-sky-500 text-white'
+                            : 'rounded-bl-sm border border-white/[0.08] bg-white/[0.05] text-slate-100'
                         }`}
                       >
                         {message.content}
@@ -564,75 +610,53 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
                   {loading && (
                     <div className="flex justify-start">
-                      <div className="bg-white/[0.05] border border-white/[0.08] text-gray-300 rounded-2xl rounded-bl-md px-3.5 py-3 text-sm flex items-center gap-2">
+                      <div className="flex items-center gap-2 rounded-xl rounded-bl-sm border border-white/[0.08] bg-white/[0.05] px-4 py-3 text-sm text-slate-200">
                         <Loader2 size={14} className="motion-reduce:animate-none animate-spin text-sky-400" />
-                        Thinking through the next step...
+                        Looking for the best next step...
                       </div>
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 mb-3">
-                {[
-                  'My dad fell off the roof and is bleeding from his head',
-                  'My child ate something under the sink',
-                ].map((prompt) => (
-                  <button
-                    key={prompt}
-                    type="button"
-                    onClick={() => setChatInput(prompt)}
-                    className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5 text-left text-[11px] leading-snug text-gray-400 hover:border-sky-500/30 hover:text-gray-200 transition-all"
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-
-              <form onSubmit={handleTriageSearch} className="flex flex-col gap-3">
-                <div>
-                  <label htmlFor="triage-chat-input" className="block text-gray-300 text-sm font-medium mb-2">
-                    Reply to the triage bot
-                  </label>
+              <div className="border-t border-white/[0.06] bg-[#0c1626] pt-2 px-6 py-5">
+              <form onSubmit={handleTriageSearch} className="mx-auto flex max-w-[420px] flex-col gap-3">
                   <textarea
                     id="triage-chat-input"
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="Type what happened, symptoms, age, or answer the bot’s question..."
-                    rows={3}
+                    placeholder="Message Vitalinq..."
+                    rows={2}
                     maxLength={500}
-                    className="w-full bg-white/[0.04] border border-white/[0.08] hover:border-white/[0.14] rounded-xl px-4 py-3.5 text-sm text-gray-100 placeholder-gray-600 resize-none focus:outline-none focus:border-sky-500/60 focus:ring-1 focus:ring-sky-500/30 transition-all leading-relaxed focus-visible:ring-2 focus-visible:ring-sky-500"
+                    className="max-h-32 w-full resize-none overflow-y-auto rounded-[12px] border border-white/[0.08] bg-white/[0.05] px-4 py-3 text-sm leading-6 text-white placeholder:text-slate-500 focus:border-sky-500/60 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
                   />
-                  <p className="text-gray-700 text-[11px] mt-1.5 text-right">
-                    {chatInput.length}/500
-                  </p>
-                </div>
                 <button
                   type="submit"
                   disabled={loading || !chatInput.trim()}
                   aria-busy={loading}
-                  className="w-full min-h-[52px] bg-sky-500 hover:bg-sky-400 disabled:bg-white/[0.05] disabled:text-gray-600 disabled:cursor-not-allowed text-white text-[15px] font-semibold rounded-xl transition-all duration-200 flex items-center justify-center gap-2.5 shadow-lg shadow-sky-500/20 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+                  className="flex min-h-[48px] w-full items-center justify-center gap-2.5 rounded-lg bg-sky-500 text-sm font-semibold text-white transition-all duration-200 hover:bg-sky-400 disabled:cursor-not-allowed disabled:bg-white/[0.08] disabled:text-slate-500 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08111d]"
                 >
                   {loading ? (
                     <>
                       <Loader2 size={16} className="motion-reduce:animate-none animate-spin" />
-                      Waiting for triage bot...
+                      Getting a reply...
                     </>
                   ) : (
                     <>
                       <Brain size={16} />
-                      Send message
+                      Send
                     </>
                   )}
                 </button>
               </form>
+              </div>
             </div>
           ) : (
             <button
               onClick={handleQuickSearch}
               disabled={loading}
               aria-busy={loading}
-              className="w-full min-h-[52px] bg-sky-500 hover:bg-sky-400 disabled:bg-white/[0.05] disabled:text-gray-600 disabled:cursor-not-allowed text-white text-[15px] font-semibold rounded-xl transition-all duration-200 flex items-center justify-center gap-2.5 shadow-lg shadow-sky-500/20 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+              className="flex min-h-[48px] w-full items-center justify-center gap-2.5 rounded-lg bg-sky-500 text-sm font-semibold text-white transition-all duration-200 hover:bg-sky-400 disabled:cursor-not-allowed disabled:bg-white/[0.08] disabled:text-slate-500 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
             >
               {loading ? (
                 <>
@@ -642,7 +666,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
               ) : (
                 <>
                   <MapPin size={16} />
-                  Find hospitals near me
+                  Find nearby hospitals
                 </>
               )}
             </button>
@@ -652,35 +676,35 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
       {/* ── STEP 2: Results ─────────────────────────────── */}
       {step === STEPS.RESULTS && (
-        <section aria-label="Hospital results" className="flex-1 overflow-y-auto px-5 space-y-2.5">
+        <section aria-label="Hospital results" className="flex-1 overflow-y-auto px-7 space-y-3 pb-7">
           {/* Triage analysis — diagnosis chip card */}
           {triageAnalysis && (
-            <div className={`mb-1 rounded-xl p-3.5 flex items-start gap-3 border-l-4 ${
+            <div className={`mb-1 flex items-start gap-3 rounded-xl p-4 border ${
               triageAnalysis.urgency === 'critical'
-                ? 'bg-red-500/8 border border-red-500/20 border-l-red-500'
+                ? 'border-red-500/25 bg-red-500/10'
                 : triageAnalysis.urgency === 'high'
-                  ? 'bg-amber-500/8 border border-amber-500/20 border-l-amber-500'
-                  : 'bg-sky-500/8 border border-sky-500/20 border-l-sky-500'
+                  ? 'border-amber-500/25 bg-amber-500/10'
+                  : 'border-sky-500/25 bg-sky-500/10'
             }`}>
               <Brain size={15} className={
-                triageAnalysis.urgency === 'critical' ? 'text-red-400 flex-shrink-0 mt-0.5' :
-                triageAnalysis.urgency === 'high' ? 'text-amber-400 flex-shrink-0 mt-0.5' :
-                'text-sky-400 flex-shrink-0 mt-0.5'
+                triageAnalysis.urgency === 'critical' ? 'mt-0.5 flex-shrink-0 text-red-500' :
+                triageAnalysis.urgency === 'high' ? 'mt-0.5 flex-shrink-0 text-amber-500' :
+                'mt-0.5 flex-shrink-0 text-sky-500'
               } />
               <div className="flex-1 min-w-0">
-                <p className="text-white text-sm font-semibold leading-snug">
-                  {triageAnalysis.condition_category?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                <p className="text-sm font-semibold leading-snug text-white">
+                  {formatConditionLabel(triageAnalysis.condition_category)}
                 </p>
-                <div className="flex items-center gap-2 mt-2 flex-wrap">
-                  <span className={`text-[11px] font-bold uppercase px-2 py-0.5 rounded-full ${
-                    triageAnalysis.urgency === 'critical' ? 'bg-red-500/20 text-red-300' :
-                    triageAnalysis.urgency === 'high' ? 'bg-amber-500/20 text-amber-300' :
-                    'bg-emerald-500/20 text-emerald-300'
+                <div className="mt-3 flex items-center gap-2 flex-wrap">
+                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                    triageAnalysis.urgency === 'critical' ? 'bg-red-500/15 text-red-300' :
+                    triageAnalysis.urgency === 'high' ? 'bg-amber-500/15 text-amber-300' :
+                    'bg-emerald-500/15 text-emerald-300'
                   }`}>
-                    {triageAnalysis.urgency}
+                    {formatUrgencyLabel(triageAnalysis.urgency)}
                   </span>
                   {triageAnalysis.required_equipment?.slice(0, 3).map((eq) => (
-                    <span key={eq} className="text-[11px] text-gray-400 bg-white/[0.05] px-2 py-0.5 rounded-full">
+                    <span key={eq} className="rounded-full border border-white/[0.08] bg-white/[0.05] px-2.5 py-1 text-[11px] text-slate-300">
                       {eq.replace(/_/g, ' ')}
                     </span>
                   ))}
@@ -691,10 +715,10 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
           {/* Medium urgency advisory */}
           {triageAnalysis?.urgency === 'medium' && (
-            <div className="mb-1 bg-amber-500/[0.07] border border-amber-500/20 rounded-xl px-3.5 py-2.5">
-              <p className="text-amber-300 text-xs flex items-center gap-2">
+            <div className="mb-1 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3.5 py-3">
+              <p className="flex items-center gap-2 text-xs text-amber-300">
                 <AlertTriangle size={12} className="flex-shrink-0" />
-                Consider visiting a clinic if this isn't urgent.
+                If this feels manageable, a clinic could also help.
               </p>
             </div>
           )}
@@ -708,55 +732,55 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                 key={result.hospital_id}
                 onClick={() => handleSelectHospital(result)}
                 aria-label={`Select ${result.name}, ${totalAvailable} emergency bed${totalAvailable !== 1 ? 's' : ''} available, ${result.distance_km}km away`}
-                className="w-full text-left bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] hover:border-sky-500/30 rounded-2xl p-4 transition-all duration-200 group focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f] relative overflow-hidden"
+                className="group relative w-full overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.04] p-4 text-left transition-all duration-200 hover:border-sky-500/30 hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
               >
                 {/* Distance pill — top right */}
-                <span className="absolute top-3.5 right-3.5 bg-white/[0.07] text-gray-400 text-[11px] font-medium px-2.5 py-1 rounded-full">
-                  {result.distance_km}km
+                <span className="absolute top-3.5 right-3.5 rounded-md bg-white/[0.07] px-2.5 py-1 text-[11px] font-medium text-slate-300">
+                  {result.distance_km} km away
                 </span>
 
                 <div className="flex items-start gap-3 pr-14">
                   {/* Rank badge */}
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5 ${
-                    idx === 0 ? 'bg-sky-500 text-white shadow-md shadow-sky-500/30' : 'bg-white/[0.06] text-gray-400'
+                  <div className={`mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                    idx === 0 ? 'bg-sky-500 text-white' : 'bg-white/[0.06] text-slate-400'
                   }`}>
                     {idx + 1}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <h4 className="text-white text-sm font-semibold truncate group-hover:text-sky-300 transition-colors">
+                    <h4 className="truncate text-sm font-semibold text-white transition-colors group-hover:text-sky-300">
                       {result.name}
                     </h4>
 
                     {/* Bed availability chips */}
-                    <div className="flex flex-wrap gap-1.5 mt-2">
+                    <div className="mt-2 flex flex-wrap gap-1.5">
                       {Object.entries(beds).map(([type, data]) => (
-                        <span key={type} className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${
+                        <span key={type} className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
                           data.available > 0
                             ? 'bg-emerald-500/15 text-emerald-300'
                             : data.overflow > 0
                               ? 'bg-amber-500/15 text-amber-300'
-                              : 'bg-red-500/15 text-red-400'
+                              : 'bg-red-500/15 text-red-300'
                         }`}>
-                          {type.toUpperCase()}: {data.available > 0 ? data.available : data.overflow > 0 ? `${data.overflow} ovf` : '0'}
+                          {type.replace(/_/g, ' ')}: {data.available > 0 ? `${data.available} open` : data.overflow > 0 ? `${data.overflow} limited` : 'full'}
                         </span>
                       ))}
                     </div>
 
                     {/* Trust + freshness row */}
-                    <div className="flex items-center gap-2 mt-2.5">
+                    <div className="mt-2.5 flex items-center gap-2">
                       {result.trust_tier === 'verified' && (
-                        <span className="text-[11px] font-medium bg-emerald-500/15 text-emerald-300 px-2 py-0.5 rounded-full">
-                          ✓ Verified
+                        <span className="rounded-full bg-emerald-500/15 px-2.5 py-1 text-[11px] font-medium text-emerald-300">
+                          Confirmed recently
                         </span>
                       )}
                       {result.trust_tier === 'unverified' && (
-                        <span className="text-[11px] font-medium bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full">
-                          ⚠ Unverified
+                        <span className="rounded-full bg-amber-500/15 px-2.5 py-1 text-[11px] font-medium text-amber-300">
+                          Needs a quick check
                         </span>
                       )}
                       {result.freshness_hours != null && (
-                        <span className="text-[11px] text-gray-600">
-                          {result.freshness_hours < 1 ? `${Math.round(result.freshness_hours * 60)}min ago` : `${Math.round(result.freshness_hours)}h ago`}
+                        <span className="text-[11px] text-slate-500">
+                          Updated {result.freshness_hours < 1 ? `${Math.round(result.freshness_hours * 60)} min ago` : `${Math.round(result.freshness_hours)} hr ago`}
                         </span>
                       )}
                     </div>
@@ -768,11 +792,11 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
           {searchResults?.length === 0 && (
             <div className="text-center py-12">
-              <div className="w-12 h-12 bg-white/[0.04] rounded-2xl flex items-center justify-center mx-auto mb-4">
-                <MapPin size={20} className="text-gray-600" />
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.05]">
+                <MapPin size={20} className="text-slate-500" />
               </div>
-              <p className="text-gray-400 text-sm font-medium">No hospitals found nearby</p>
-              <p className="text-gray-600 text-xs mt-1">Try expanding your search area</p>
+              <p className="text-sm font-medium text-slate-200">No nearby hospitals found</p>
+              <p className="mt-1 text-xs text-slate-500">Try again and allow a wider search area.</p>
             </div>
           )}
         </section>
@@ -780,47 +804,46 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
       {/* ── STEP 2b: Low Urgency — Clinic Redirect ──────── */}
       {step === STEPS.LOW_URGENCY && (
-        <section aria-label="Non-emergency clinic options" className="flex-1 overflow-y-auto px-5 space-y-3">
+        <section aria-label="Non-emergency clinic options" className="flex-1 overflow-y-auto px-7 pb-7 space-y-3">
           {/* Triage analysis */}
           {triageAnalysis && (
-            <div className="bg-amber-500/[0.07] border border-amber-500/20 rounded-xl p-3.5">
-              <p className="text-amber-300 text-xs font-medium mb-2 flex items-center gap-1.5">
-                <Brain size={12} /> AI Analysis
+            <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-4">
+              <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-amber-300">
+                <Brain size={12} /> What we noticed
               </p>
-              <p className="text-white text-sm font-semibold">
-                {triageAnalysis.condition_category?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+              <p className="text-sm font-semibold text-white">
+                {formatConditionLabel(triageAnalysis.condition_category)}
               </p>
-              <div className="flex items-center gap-2 mt-2">
-                <span className="text-[11px] font-bold uppercase px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
-                  {triageAnalysis.urgency}
+              <div className="mt-2 flex items-center gap-2">
+                <span className="rounded-full border border-emerald-500/20 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                  {formatUrgencyLabel(triageAnalysis.urgency)}
                 </span>
               </div>
             </div>
           )}
 
           {/* Advisory card */}
-          <div className="bg-white/[0.03] border border-white/[0.08] rounded-2xl p-4">
-            <p className="text-amber-400 text-xs font-semibold mb-2 flex items-center gap-1.5">
-              <AlertTriangle size={12} /> Non-emergency assessment
+          <div className="rounded-xl border border-white/[0.08] bg-white/[0.04] p-4">
+            <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+              <AlertTriangle size={12} /> Good news
             </p>
-            <p className="text-gray-300 text-sm leading-relaxed">
-              Based on your description, this may not require emergency hospital care.
-              We recommend visiting a nearby clinic or pharmacy.
+            <p className="text-sm leading-relaxed text-slate-200">
+              This may not need emergency hospital care. A nearby clinic or pharmacy could be the right next step.
             </p>
 
             {/* Self-care advice */}
             {triageAnalysis?.self_care_advice?.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-white/[0.06]">
-                <p className="text-gray-400 text-xs font-semibold mb-2">💊 Self-care suggestions</p>
+              <div className="mt-3 border-t border-white/[0.06] pt-3">
+                <p className="mb-2 text-xs font-semibold text-slate-400">Self-care tips</p>
                 <ul className="space-y-1.5">
                   {triageAnalysis.self_care_advice.map((tip, i) => (
-                    <li key={i} className="text-gray-400 text-xs flex items-start gap-2 leading-relaxed">
-                      <span className="text-gray-600 mt-1 flex-shrink-0">•</span>
+                    <li key={i} className="flex items-start gap-2 text-xs leading-relaxed text-slate-300">
+                      <span className="mt-1 flex-shrink-0 text-slate-500">•</span>
                       {tip}
                     </li>
                   ))}
                 </ul>
-                <p className="text-gray-600 text-[11px] mt-3 italic">
+                <p className="mt-3 text-[11px] italic text-slate-500">
                   If symptoms worsen, seek medical attention immediately.
                 </p>
               </div>
@@ -830,34 +853,34 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           {/* Clinic results */}
           {clinicResults && clinicResults.length > 0 && (
             <>
-              <p className="text-gray-500 text-xs font-medium">Nearby clinics & pharmacies</p>
+              <p className="text-xs font-medium text-slate-400">Nearby clinics and pharmacies</p>
               {clinicResults.map((clinic) => (
                 <div
                   key={clinic.id}
-                  className="bg-white/[0.03] border border-white/[0.07] rounded-2xl p-4"
+                  className="rounded-xl border border-white/[0.08] bg-white/[0.04] p-4"
                 >
-                  <h4 className="text-white text-sm font-semibold">{clinic.name}</h4>
+                  <h4 className="text-sm font-semibold text-white">{clinic.name}</h4>
                   {clinic.address && (
-                    <address className="text-gray-500 text-xs mt-1 not-italic">📍 {clinic.address}</address>
+                    <address className="mt-1 text-xs not-italic text-slate-400">{clinic.address}</address>
                   )}
                   <div className="flex gap-2 mt-3">
                     {clinic.phone && (
                       <a
                         href={`tel:${clinic.phone}`}
-                        className="flex-1 min-h-[44px] bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/25 text-sky-300 text-xs font-semibold py-2.5 rounded-xl transition-all text-center flex items-center justify-center focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#08090f]"
+                        className="flex min-h-[42px] flex-1 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.05] py-2.5 text-center text-xs font-semibold text-slate-200 transition-all hover:bg-white/[0.08] focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#070d17]"
                         onClick={e => e.stopPropagation()}
                       >
-                        📞 Call
+                        Call
                       </a>
                     )}
                     <a
                       href={`https://maps.google.com/maps?daddr=${encodeURIComponent(clinic.address || clinic.name + ' Lagos')}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex-1 min-h-[44px] bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/25 text-emerald-300 text-xs font-semibold py-2.5 rounded-xl transition-all text-center flex items-center justify-center focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-1 focus-visible:ring-offset-[#08090f]"
+                      className="flex min-h-[42px] flex-1 items-center justify-center rounded-lg bg-sky-500 py-2.5 text-center text-xs font-semibold text-white transition-all hover:bg-sky-400 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#070d17]"
                       onClick={e => e.stopPropagation()}
                     >
-                      🗺 Directions
+                      Get directions
                     </a>
                   </div>
                 </div>
@@ -887,14 +910,15 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   });
                   onResults(res.data.results);
                   setStep(STEPS.RESULTS);
-                } catch (err) {
+                } catch (error) {
+                  console.error('Clinic fallback search failed:', error);
                   setError('Search failed.');
                 } finally {
                   setLoading(false);
                 }
               })();
             }}
-            className="w-full min-h-[48px] mt-1 bg-red-500/10 hover:bg-red-500/18 border border-red-500/25 text-red-400 text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2 focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+            className="mt-1 flex min-h-[46px] w-full items-center justify-center gap-2 rounded-lg border border-red-500/25 bg-red-500/10 text-sm font-semibold text-red-300 transition-all hover:bg-red-500/15 focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
           >
             <AlertTriangle size={14} />
             I still need a hospital
@@ -904,16 +928,16 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
       {/* ── STEP 3: Patient Details ─────────────────────── */}
       {step === STEPS.PATIENT && (
-        <section aria-label="Patient information" className="px-5 flex-1 overflow-y-auto">
+        <section aria-label="Patient information" className="px-7 flex-1 overflow-y-auto pb-7">
           {/* Selected hospital summary */}
           {selectedResult && (
-            <div className="bg-sky-500/[0.07] border border-sky-500/20 rounded-2xl p-4 mb-5">
+            <div className="mb-5 rounded-xl border border-white/[0.08] bg-white/[0.04] p-4">
               <div className="flex items-center justify-between">
-                <h4 className="text-white text-sm font-semibold">{selectedResult.name}</h4>
-                <span className="bg-white/[0.06] text-gray-400 text-[11px] px-2 py-0.5 rounded-full">{selectedResult.distance_km}km</span>
+                <h4 className="text-sm font-semibold text-white">{selectedResult.name}</h4>
+                <span className="rounded-md bg-white/[0.06] px-2.5 py-1 text-[11px] text-slate-300">{selectedResult.distance_km} km</span>
               </div>
               {selectedResult.address && (
-                <address className="text-gray-500 text-xs mt-1.5 not-italic">{selectedResult.address}</address>
+                <address className="mt-1.5 text-xs not-italic text-slate-400">{selectedResult.address}</address>
               )}
             </div>
           )}
@@ -921,29 +945,29 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           <form onSubmit={handleBookBed} className="space-y-4">
             {/* Name */}
             <div>
-              <label htmlFor="patient-name" className="block text-gray-300 text-sm font-medium mb-2">
-                Patient name
+              <label htmlFor="patient-name" className="mb-2 block text-sm font-medium text-slate-200">
+                Person's name
               </label>
               <div className="relative">
-                <User size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
+                <User size={15} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" />
                 <input
                   id="patient-name"
                   type="text"
                   value={patientName}
                   onChange={(e) => setPatientName(e.target.value)}
                   placeholder="e.g. John Doe"
-                  className="w-full h-[52px] bg-white/[0.04] border border-white/[0.08] hover:border-white/[0.14] rounded-xl pl-10 pr-4 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-sky-500/60 focus:ring-1 focus:ring-sky-500/30 transition-all focus-visible:ring-2 focus-visible:ring-sky-500"
+                  className="h-[50px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] pl-10 pr-4 text-sm text-white placeholder:text-slate-500 focus:border-sky-500/60 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
                 />
               </div>
             </div>
 
             {/* Phone */}
             <div>
-              <label htmlFor="patient-phone" className="block text-gray-300 text-sm font-medium mb-2">
+              <label htmlFor="patient-phone" className="mb-2 block text-sm font-medium text-slate-200">
                 Phone number <span className="text-red-400">*</span>
               </label>
               <div className="relative">
-                <Phone size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
+                <Phone size={15} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" />
                 <input
                   id="patient-phone"
                   type="tel"
@@ -951,29 +975,29 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   onChange={(e) => setPatientPhone(e.target.value)}
                   placeholder="+234..."
                   required
-                  className="w-full h-[52px] bg-white/[0.04] border border-white/[0.08] hover:border-white/[0.14] rounded-xl pl-10 pr-4 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-sky-500/60 focus:ring-1 focus:ring-sky-500/30 transition-all focus-visible:ring-2 focus-visible:ring-sky-500"
+                  className="h-[50px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] pl-10 pr-4 text-sm text-white placeholder:text-slate-500 focus:border-sky-500/60 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
                 />
               </div>
-              <p className="text-xs mt-2 text-gray-500 flex items-center gap-1.5">
+              <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-400">
                 <span className="w-2 h-2 rounded-full bg-[#25D366] flex-shrink-0" />
-                Hospital will receive a notification via WhatsApp
+                We may use this number to contact you with updates.
               </p>
             </div>
 
             {/* Condition */}
             <div>
-              <label htmlFor="patient-condition" className="block text-gray-300 text-sm font-medium mb-2">
-                Brief condition
+              <label htmlFor="patient-condition" className="mb-2 block text-sm font-medium text-slate-200">
+                What should they know?
               </label>
               <div className="relative">
-                <FileText size={15} className="absolute left-4 top-4 text-gray-600 pointer-events-none" />
+                <FileText size={15} className="pointer-events-none absolute left-4 top-4 text-slate-500" />
                 <textarea
                   id="patient-condition"
                   value={patientCondition}
                   onChange={(e) => setPatientCondition(e.target.value)}
-                  placeholder="e.g. Male, 68, fell from height, head injury"
+                  placeholder="Example: 68 years old, fell from a height, bleeding from the head"
                   rows={3}
-                  className="w-full bg-white/[0.04] border border-white/[0.08] hover:border-white/[0.14] rounded-xl pl-10 pr-4 pt-3.5 pb-3 text-sm text-gray-100 placeholder-gray-600 resize-none focus:outline-none focus:border-sky-500/60 focus:ring-1 focus:ring-sky-500/30 transition-all leading-relaxed focus-visible:ring-2 focus-visible:ring-sky-500"
+                  className="w-full resize-none rounded-lg border border-white/[0.08] bg-white/[0.04] pl-10 pr-4 pt-3 pb-3 text-sm leading-relaxed text-white placeholder:text-slate-500 focus:border-sky-500/60 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
                 />
               </div>
             </div>
@@ -982,12 +1006,12 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
               type="submit"
               disabled={loading || !patientPhone.trim()}
               aria-busy={loading}
-              className="w-full min-h-[52px] bg-emerald-600 hover:bg-emerald-500 disabled:bg-white/[0.05] disabled:text-gray-600 disabled:cursor-not-allowed text-white text-[15px] font-semibold rounded-xl transition-all duration-200 flex items-center justify-center gap-2.5 shadow-lg shadow-emerald-600/20 mt-2 focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+              className="mt-2 flex min-h-[48px] w-full items-center justify-center gap-2.5 rounded-lg bg-sky-500 text-sm font-semibold text-white transition-all duration-200 hover:bg-sky-400 disabled:cursor-not-allowed disabled:bg-white/[0.08] disabled:text-slate-500 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
             >
               {loading ? (
                 <>
                   <Loader2 size={16} className="motion-reduce:animate-none animate-spin" />
-                  Reserving bed...
+                  Saving your request...
                 </>
               ) : (
                 <>
@@ -995,7 +1019,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                     <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                     <path d="M7 11V7a5 5 0 0 1 10 0v4" />
                   </svg>
-                  Reserve bed
+                  Save my spot
                 </>
               )}
             </button>
@@ -1007,56 +1031,56 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
       {step === STEPS.TRACKING && (
         <section
           aria-label="Reservation status"
-          className="px-5 flex-1 overflow-y-auto"
+          className="px-7 flex-1 overflow-y-auto pb-7"
         >
           {/* Transfer code card */}
           {transferCode && (
-            <div className={`rounded-2xl p-5 mb-4 text-center relative ${
+            <div className={`relative mb-4 rounded-xl p-5 text-center ${
               handshake?.status === 'accepted'
-                ? 'bg-sky-500/[0.07] border-2 border-sky-400/40'
-                : 'bg-white/[0.03] border border-white/[0.08]'
+                ? 'border-2 border-sky-400/35 bg-sky-500/10'
+                : 'border border-white/[0.08] bg-white/[0.04]'
             }`}>
               {/* Pulsing halo when accepted */}
               {handshake?.status === 'accepted' && (
-                <div className="absolute inset-0 rounded-2xl border-2 border-sky-400/20 motion-reduce:hidden animate-ping opacity-40 pointer-events-none" />
+                <div className="absolute inset-0 rounded-xl border-2 border-sky-400/20 motion-reduce:hidden animate-ping opacity-40 pointer-events-none" />
               )}
-              <p className="text-gray-500 text-xs font-medium mb-3 uppercase tracking-wider">Transfer Code</p>
+              <p className="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">Booking code</p>
               <div className="flex items-center justify-center gap-3">
-                <span className="text-white text-4xl font-mono font-bold tracking-[0.2em]">
+                <span className="text-4xl font-mono font-bold tracking-[0.2em] text-white">
                   {transferCode}
                 </span>
                 <button
                   onClick={copyCode}
-                  aria-label="Copy transfer code"
-                  className="w-9 h-9 flex items-center justify-center bg-white/[0.06] hover:bg-white/[0.10] rounded-xl text-gray-400 hover:text-white transition-all focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#08090f]"
+                  aria-label="Copy booking code"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/[0.06] text-slate-400 transition-all hover:bg-white/[0.1] hover:text-white focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#070d17]"
                 >
                   {codeCopied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
                 </button>
               </div>
               <p
                 aria-live="polite"
-                className="text-gray-600 text-[11px] mt-3"
+                className="mt-3 text-[11px] text-slate-400"
               >
-                {codeCopied ? '✓ Copied to clipboard' : 'Show this code when you arrive at the hospital'}
+                {codeCopied ? 'Copied' : 'Show this code when you arrive'}
               </p>
             </div>
           )}
 
           {/* Hospital contact card */}
           {selectedResult && (
-            <div className="bg-white/[0.03] border border-white/[0.07] rounded-2xl p-4 mb-4">
-              <h4 className="text-white text-sm font-semibold">{selectedResult.name}</h4>
+            <div className="mb-4 rounded-xl border border-white/[0.08] bg-white/[0.04] p-4">
+              <h4 className="text-sm font-semibold text-white">{selectedResult.name}</h4>
               {selectedResult.address && (
-                <address className="text-gray-500 text-xs mt-1.5 not-italic leading-relaxed">{selectedResult.address}</address>
+                <address className="mt-1.5 text-xs not-italic leading-relaxed text-slate-400">{selectedResult.address}</address>
               )}
               {selectedResult.phone && (
                 <a
                   href={`tel:${selectedResult.phone}`}
-                  className="mt-3 flex items-center gap-2.5 bg-sky-500/[0.07] hover:bg-sky-500/[0.13] border border-sky-500/20 rounded-xl px-3.5 py-2.5 transition-colors focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#08090f]"
+                  className="mt-3 flex items-center gap-2.5 rounded-lg border border-white/[0.08] bg-white/[0.05] px-3.5 py-2.5 transition-colors hover:bg-white/[0.08] focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-1 focus-visible:ring-offset-[#070d17]"
                 >
                   <Phone size={14} className="text-sky-400" />
-                  <span className="text-sky-300 text-sm font-medium">{selectedResult.phone}</span>
-                  <span className="text-gray-600 text-[10px] ml-auto">Tap to call</span>
+                  <span className="text-sm font-medium text-slate-100">{selectedResult.phone}</span>
+                  <span className="ml-auto text-[10px] text-slate-500">Tap to call</span>
                 </a>
               )}
             </div>
@@ -1064,39 +1088,15 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
           {/* Countdown timer for accepted */}
           {handshake?.status === 'accepted' && countdown > 0 && (
-            <div className="mb-4 bg-amber-500/[0.08] border border-amber-500/20 rounded-2xl px-4 py-3.5 flex items-center gap-4">
+            <div className="mb-4 flex items-center gap-4 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3.5">
               <div className="flex-1">
-                <p className="text-amber-400/80 text-[11px] font-medium uppercase tracking-wider">Bed held for</p>
-                <p className="text-amber-300 text-3xl font-mono font-bold mt-0.5 tabular-nums">
+                <p className="text-[11px] font-medium uppercase tracking-wider text-amber-300">Spot held for</p>
+                <p className="mt-0.5 text-3xl font-mono font-bold tabular-nums text-amber-300">
                   {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
                 </p>
               </div>
-              <Clock size={24} className="text-amber-500/40 flex-shrink-0" />
-              <p className="text-amber-400/50 text-[10px] max-w-[80px] leading-snug">Please arrive before expiry</p>
-            </div>
-          )}
-
-          {handshake?.status === 'accepted' && transportRequest && (
-            <div className={`mb-4 rounded-2xl px-4 py-3.5 border ${
-              transportRequest.status === 'dispatched'
-                ? 'bg-emerald-500/[0.08] border-emerald-500/20'
-                : 'bg-amber-500/[0.08] border-amber-500/20'
-            }`}>
-              <p className={`text-xs font-semibold uppercase tracking-wider ${
-                transportRequest.status === 'dispatched' ? 'text-emerald-300' : 'text-amber-300'
-              }`}>
-                Transport {transportRequest.status}
-              </p>
-              <p className="text-white text-sm mt-1 leading-relaxed">
-                {transportRequest.status === 'dispatched'
-                  ? `${transportRequest.provider_name || 'Ambulance provider'} is heading to your pickup point.`
-                  : 'Your receiving hospital and dispatch queue have been alerted.'}
-              </p>
-              {transportRequest.provider_eta_min && (
-                <p className="text-gray-400 text-xs mt-2">
-                  Estimated arrival: about {transportRequest.provider_eta_min} minutes
-                </p>
-              )}
+              <Clock size={24} className="flex-shrink-0 text-amber-400" />
+              <p className="max-w-[80px] text-[10px] leading-snug text-amber-300">Please arrive before time runs out</p>
             </div>
           )}
 
@@ -1117,25 +1117,25 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   </div>
                 </div>
 
-                <h3 className="text-white text-xl font-bold mb-2">Arrival Confirmed</h3>
-                <p className="text-gray-400 text-sm leading-relaxed mb-5">
+                <h3 className="mb-2 text-xl font-bold text-white">Arrival confirmed</h3>
+                <p className="mb-5 text-sm leading-relaxed text-slate-400">
                   You have been checked in at<br />
-                  <span className="text-white font-semibold">{selectedResult?.name || 'the hospital'}</span>
+                  <span className="font-semibold text-white">{selectedResult?.name || 'the hospital'}</span>
                 </p>
 
-                <div className="bg-emerald-500/[0.07] border border-emerald-500/20 rounded-xl px-5 py-4 mb-5 inline-block">
-                  <p className="text-emerald-400/60 text-[10px] uppercase tracking-widest mb-1">Transfer Code</p>
-                  <p className="text-emerald-300 text-2xl font-mono font-bold tracking-[0.2em]">{transferCode}</p>
+                <div className="mb-5 inline-block rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-5 py-4">
+                  <p className="mb-1 text-[10px] uppercase tracking-widest text-emerald-300">Booking code</p>
+                  <p className="text-2xl font-mono font-bold tracking-[0.2em] text-emerald-300">{transferCode}</p>
                 </div>
 
-                <p className="text-gray-600 text-xs mb-6 leading-relaxed">
-                  The hospital has verified your code.<br />
-                  Wishing a speedy recovery.
+                <p className="mb-6 text-xs leading-relaxed text-slate-400">
+                  The hospital has confirmed your code.<br />
+                  Wishing you a smooth recovery.
                 </p>
 
                 <button
                   onClick={handleReset}
-                  className="text-gray-500 hover:text-gray-300 text-sm transition-colors focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f] rounded"
+                  className="rounded text-sm text-slate-400 transition-colors hover:text-white focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
                 >
                   Close
                 </button>
@@ -1147,10 +1147,12 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   label="Reservation created"
                   status="done"
                   detail={selectedResult?.name}
+                  icon={BedDouble}
                 />
                 <StatusStep
-                  label="Hospital notified via WhatsApp"
+                  label="Hospital has been notified"
                   status="done"
+                  icon={Bell}
                 />
                 <StatusStep
                   label="Waiting for hospital response"
@@ -1161,25 +1163,142 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   }
                   detail={
                     !handshake || handshake.status === 'requested'
-                      ? 'This usually takes 1–3 minutes...'
+                      ? 'This usually takes 1 to 3 minutes.'
                       : undefined
                   }
                   isLast={!handshake || handshake.status === 'requested'}
+                  icon={Clock}
                 />
 
-                {handshake?.status === 'accepted' && (
+                {(handshake?.status === 'accepted' || hasAmbulanceReroute) && (
                   <>
                     <StatusStep
-                      label="Bed confirmed!"
-                      status="done"
-                      detail={`Held for ${countdown ? Math.ceil(countdown / 60) : '—'} minutes`}
+                      label={hasAmbulanceReroute ? 'Bed was reassigned' : 'Bed confirmed!'}
+                      status={hasAmbulanceReroute ? 'failed' : 'done'}
+                      detail={
+                        hasAmbulanceReroute
+                          ? `Your ambulance has been rerouted to ${transportData?._hospital?.name || 'a new hospital'}`
+                          : `Saved for about ${countdown ? Math.ceil(countdown / 60) : '—'} minutes`
+                      }
                       highlight
+                      icon={CheckCircle2}
                     />
+
+                    {/* Ambulance tracking — second to last */}
+                    {transportData && (
+                      <StatusStep
+                        label={
+                          transportData.status === 'asking_hospital' ? 'Checking whether the hospital can send transport' :
+                          transportData.status === 'asking_dispatch' ? 'Checking ambulance services nearby' :
+                          transportData.status === 'hospital_accepted' ? 'The hospital is sending transport' :
+                          transportData.status === 'dispatch_accepted' ? 'An ambulance is on the way' :
+                          transportData.status === 'rerouted' ? '🔄 Ambulance rerouted' :
+                          transportData.status === 'no_ambulance' ? 'No ambulance is available right now' :
+                          'Transport requested'
+                        }
+                        status={
+                          transportData.status === 'asking_hospital' || transportData.status === 'asking_dispatch' ? 'active' :
+                          transportData.status === 'hospital_accepted' || transportData.status === 'dispatch_accepted' || transportData.status === 'rerouted' ? 'done' :
+                          transportData.status === 'no_ambulance' ? 'failed' : 'active'
+                        }
+                        detail={
+                          transportData.status === 'hospital_accepted' && transportData.crew_phone
+                            ? `Call them: ${transportData.crew_phone}`
+                            : transportData.status === 'dispatch_accepted'
+                            ? `${transportData._company?.name || 'Ambulance service'} — ${transportData._ambulance?.vehicle_id || 'ambulance'}`
+                            : transportData.status === 'rerouted'
+                            ? `Now heading to ${transportData._hospital?.name || 'new hospital'}`
+                            : transportData.status === 'no_ambulance'
+                            ? 'Call LASEMA: 767 or 112'
+                            : undefined
+                        }
+                      />
+                    )}
+
+                    {/* Dispatch delivery tracker inline */}
+                    {(transportData?.status === 'dispatch_accepted' || transportData?.status === 'rerouted') && (() => {
+                      const STAGES = [
+                        { id: 'assigned', icon: Ambulance, label: 'Ambulance assigned' },
+                        { id: 'dispatched', icon: Ambulance, label: 'Ambulance dispatched' },
+                        { id: 'en_route_to_patient', icon: Navigation, label: 'Heading to patient' },
+                        { id: 'at_scene', icon: LocateFixed, label: 'Arrived at pickup point' },
+                        { id: 'en_route_to_hospital', icon: Building2, label: 'Heading to hospital' },
+                        { id: 'delivered', icon: CheckCircle2, label: 'Arrived at hospital' },
+                      ];
+                      const timeline = transportData._timeline || [];
+                      const completedStatuses = new Set(timeline.map(t => t.status));
+                      const assignmentStatus = transportData._assignment_status || 'assigned';
+                      const currentIdx = STAGES.findIndex(s => s.id === assignmentStatus);
+
+                      return (
+                        <div className="ml-8 mb-4 rounded-lg border border-white/[0.08] bg-[#0c1322] px-4 py-4">
+                          <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">Ambulance progress</p>
+                          {STAGES.filter((s, i) => i === 0 || s.id !== 'dispatched').map((stage, i) => {
+                            const timeEntry = timeline.find(t => t.status === stage.id);
+                            const stageIdx = STAGES.findIndex(s => s.id === stage.id);
+                            const isDone = stageIdx <= currentIdx || completedStatuses.has(stage.id);
+                            const isCurrent = stage.id === assignmentStatus;
+                            const StageIcon = stage.icon;
+
+                            return (
+                              <div key={stage.id} className="flex items-start gap-3">
+                                <div className="flex flex-col items-center">
+                                  <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border ${
+                                    isDone
+                                      ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300'
+                                      : isCurrent
+                                        ? 'border-sky-400/40 bg-sky-500/15 text-sky-300'
+                                        : 'border-white/[0.08] bg-white/[0.04] text-slate-500'
+                                  } ${isCurrent ? 'ring-2 ring-sky-400/20' : ''}`}>
+                                    <StageIcon size={16} strokeWidth={2.2} />
+                                  </div>
+                                  {i < 4 && (
+                                    <div className={`mt-2 w-px h-6 ${isDone && !isCurrent ? 'bg-emerald-400/50' : 'bg-white/[0.08]'}`} />
+                                  )}
+                                </div>
+                                <div className="pt-1 pb-2">
+                                  <p className={`text-sm font-medium leading-snug ${
+                                    isDone ? 'text-white' : isCurrent ? 'text-sky-200' : 'text-slate-400'
+                                  }`}>
+                                    {stage.label}
+                                  </p>
+                                  {timeEntry && (
+                                    <p className="mt-1 text-xs text-slate-500">
+                                      {new Date(timeEntry.created_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {transportData.crew_phone && (
+                            <p className="mt-2 border-t border-white/[0.08] pt-3 text-sm text-slate-400">
+                              Crew phone: <span className="text-white">{transportData.crew_phone}</span>
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Reroute alert */}
+                    {transportData?._rerouted && (
+                      <div className="ml-8 mb-3 rounded-2xl bg-red-500/[0.06] border border-red-500/20 px-4 py-3">
+                        <p className="text-red-400 text-[10px] font-semibold uppercase tracking-wider">⚠️ Destination Changed</p>
+                        <p className="text-gray-300 text-xs mt-1.5 leading-relaxed">{transportData._reroute_note || 'The original hospital overrode your bed. Your ambulance is being rerouted.'}</p>
+                        {transportData._hospital && (
+                          <p className="text-white text-sm font-semibold mt-2">
+                            New destination: {transportData._hospital.name}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
                     <StatusStep
                       label="Awaiting your arrival"
                       status="active"
-                      detail="Show your transfer code to the nurse on arrival"
+                      detail="Show your booking code when you arrive"
                       isLast
+                      icon={MapPinned}
                     />
                   </>
                 )}
@@ -1193,6 +1312,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                       detail="You've been admitted. Wishing a speedy recovery."
                       highlight
                       isLast
+                      icon={CheckCircle2}
                     />
                   </>
                 )}
@@ -1203,14 +1323,15 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                     status="failed"
                     detail={
                       {
-                        no_beds: 'All beds are currently occupied.',
-                        wrong_specialty: "This hospital doesn't have the specialty needed.",
-                        equipment_unavailable: 'Required equipment is currently unavailable.',
-                        too_severe: 'Your condition needs a higher-level facility.',
-                        too_minor: 'Your condition may not need hospital care.',
+                        no_beds: 'All beds are full right now.',
+                        wrong_specialty: "This hospital may not have the care you need.",
+                        equipment_unavailable: 'Important equipment is not available right now.',
+                        too_severe: 'A higher-level hospital may be safer for this case.',
+                        too_minor: 'This may not need hospital care.',
                       }[handshake.declined_reason] || handshake.declined_reason || 'Try another hospital'
                     }
                     isLast
+                    icon={ShieldAlert}
                   />
                 )}
 
@@ -1220,38 +1341,43 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                     status="failed"
                     detail="The hold time ran out"
                     isLast
+                    icon={Clock}
                   />
                 )}
 
-                {handshake?.status === 'overridden' && (
+                {handshake?.status === 'overridden' && !hasAmbulanceReroute && (
                   <>
                     <StatusStep
-                      label="Bed reassigned — we're sorry"
+                      label="The saved bed was reassigned"
                       status="failed"
-                      detail="A critical walk-in emergency required immediate care. We understand this is frustrating."
+                      detail="A walk-in emergency needed immediate care. We know this is frustrating."
+                      icon={RefreshCcw}
                     />
                     {rerouteLoading && (
                       <StatusStep
-                        label="Finding you another hospital..."
+                        label="Looking for another hospital"
                         status="active"
-                        detail="We're on it — no action needed from you"
+                        detail="You do not need to do anything right now."
+                        icon={RefreshCcw}
                       />
                     )}
                     {rerouteResults && rerouteResults.length > 0 && (
                       <StatusStep
-                        label={`We've found ${rerouteResults.length} alternative${rerouteResults.length > 1 ? 's' : ''} for you`}
+                        label={`We found ${rerouteResults.length} other option${rerouteResults.length > 1 ? 's' : ''}`}
                         status="done"
-                        detail="Tap one to confirm and we'll reserve it immediately"
+                        detail="Choose one and we will try to save a spot there."
                         highlight
                         isLast
+                        icon={MapPin}
                       />
                     )}
                     {rerouteResults && rerouteResults.length === 0 && (
                       <StatusStep
-                        label="No alternatives found nearby"
+                        label="No other nearby hospitals found"
                         status="failed"
-                        detail="Try searching again with a wider area"
+                        detail="Please search again and try a wider area."
                         isLast
+                        icon={MapPin}
                       />
                     )}
                   </>
@@ -1261,9 +1387,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           </div>
 
           {/* Reroute results for overridden */}
-          {handshake?.status === 'overridden' && rerouteResults && rerouteResults.length > 0 && (
+          {handshake?.status === 'overridden' && !hasAmbulanceReroute && rerouteResults && rerouteResults.length > 0 && (
             <div className="mt-4">
-              <p className="text-gray-500 text-xs font-medium mb-2.5">Alternative hospitals found:</p>
+              <p className="mb-2.5 text-xs font-medium text-slate-400">Other hospitals you can try:</p>
               <div className="space-y-2">
                 {rerouteResults.map((result, idx) => {
                   const beds = result.beds || {};
@@ -1285,27 +1411,27 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                         setStep(STEPS.PATIENT);
                       }}
                       aria-label={`Select ${result.name}, ${totalAvail} emergency beds available, ${result.distance_km}km away`}
-                      className="w-full text-left bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] hover:border-sky-500/30 rounded-2xl p-3.5 transition-all group focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+                      className="group w-full rounded-lg border border-white/[0.08] bg-white/[0.04] p-3.5 text-left transition-all hover:border-sky-500/30 hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
                     >
                       <div className="flex items-start gap-3">
                         <div className={`w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 mt-0.5 ${
-                          idx === 0 ? 'bg-sky-500 text-white' : 'bg-white/[0.06] text-gray-400'
+                          idx === 0 ? 'bg-sky-500 text-white' : 'bg-white/[0.06] text-slate-400'
                         }`}>
                           {idx + 1}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-baseline justify-between gap-2">
-                            <h4 className="text-white text-sm font-medium truncate group-hover:text-sky-300 transition-colors">
+                            <h4 className="truncate text-sm font-medium text-white transition-colors group-hover:text-sky-300">
                               {result.name}
                             </h4>
-                            <span className="text-gray-600 text-[11px] flex-shrink-0">{result.distance_km}km</span>
+                            <span className="flex-shrink-0 text-[11px] text-slate-500">{result.distance_km} km</span>
                           </div>
                           <div className="flex flex-wrap gap-1.5 mt-1.5">
                             {Object.entries(beds).map(([type, data]) => (
-                              <span key={type} className={`text-[11px] font-medium px-1.5 py-0.5 rounded-full ${
-                                data.available > 0 ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-400'
+                              <span key={type} className={`rounded-full px-2 py-1 text-[11px] font-medium ${
+                                data.available > 0 ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'
                               }`}>
-                                {type.toUpperCase()}: {data.available || 0}
+                                {type.replace(/_/g, ' ')}: {data.available || 0}
                               </span>
                             ))}
                           </div>
@@ -1326,10 +1452,10 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   href={`https://maps.google.com/maps?daddr=${selectedResult.address || selectedResult.name + ' Lagos'}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex-1 min-h-[48px] bg-sky-500 hover:bg-sky-400 text-white text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+                  className="flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-lg bg-sky-500 text-sm font-semibold text-white transition-all hover:bg-sky-400 focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
                 >
                   <Navigation size={15} />
-                  Directions
+                  Get directions
                 </a>
                 <a
                   href={`https://wa.me/?text=${encodeURIComponent(
@@ -1342,27 +1468,27 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   )}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex-1 min-h-[48px] bg-[#25D366] hover:bg-[#20bd5a] text-white text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#25D366]/20 focus-visible:ring-2 focus-visible:ring-[#25D366] focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+                  className="flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.05] text-sm font-semibold text-slate-100 transition-all hover:bg-white/[0.08] focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
                 >
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
-                  Share
+                  Share details
                 </a>
               </div>
 
               <button
                 onClick={handleRequestTransport}
-                disabled={transportLoading || !!transportRequest}
-                className="w-full min-h-[48px] bg-red-500/10 hover:bg-red-500/20 disabled:bg-white/[0.05] disabled:text-gray-600 disabled:border-white/[0.06] border border-red-500/25 text-red-300 text-sm font-semibold rounded-xl transition-all flex items-center justify-center gap-2.5 focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+                disabled={transportLoading || !!transportId}
+                className="flex min-h-[46px] w-full items-center justify-center gap-2.5 rounded-lg border border-red-500/25 bg-red-500/10 text-sm font-semibold text-red-300 transition-all hover:bg-red-500/15 disabled:border-white/[0.06] disabled:bg-white/[0.05] disabled:text-slate-500 focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
               >
                 {transportLoading ? (
                   <>
                     <Loader2 size={16} className="motion-reduce:animate-none animate-spin" />
                     Requesting transport...
                   </>
-                ) : transportRequest ? (
+                ) : transportId ? (
                   <>Transport requested</>
                 ) : (
-                  <>🚑 I need transport</>
+                  <>I need transport</>
                 )}
               </button>
             </div>
@@ -1371,7 +1497,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           {(handshake?.status === 'declined' || handshake?.status === 'expired' || handshake?.status === 'overridden') && (
             <button
               onClick={handleReset}
-              className="w-full mt-4 min-h-[48px] bg-sky-500 hover:bg-sky-400 text-white text-sm font-semibold rounded-xl transition-all focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f]"
+              className="mt-4 min-h-[46px] w-full rounded-lg bg-sky-500 text-sm font-semibold text-white transition-all hover:bg-sky-400 focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
             >
               Search again
             </button>
@@ -1380,21 +1506,21 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
       )}
 
       {/* ── Footer ──────────────────────────────────────── */}
-      <div className="px-5 py-4 border-t border-white/[0.05]">
+      <div className="border-t border-white/[0.06] px-6 py-4">
         {step === STEPS.TRACKING ? (
           <button
             onClick={handleReset}
-            className="w-full text-gray-600 hover:text-gray-400 text-xs text-center transition-colors focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08090f] rounded"
+            className="w-full rounded text-center text-xs text-slate-400 transition-colors hover:text-white focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070d17]"
           >
             Start a new search
           </button>
         ) : (
-          <p className="text-gray-700 text-[11px] text-center">
-            In an emergency? Text <span className="text-sky-400 font-semibold">EMERGENCY</span> to our WhatsApp
+          <p className="text-center text-[11px] text-slate-500">
+            If this is life-threatening, call your local emergency number right away.
           </p>
         )}
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -1402,54 +1528,51 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 /**
  * StatusStep — single step in the vertical timeline status tracker.
  */
-function StatusStep({ label, status, detail, highlight, isLast }) {
-  // Node style per status
+function StatusStep({ label, status, detail, highlight, isLast, icon: Icon }) {
   const nodeStyle = {
-    done: 'bg-emerald-500 border-emerald-500',
-    active: 'bg-transparent border-sky-400',
-    failed: 'bg-red-500 border-red-500',
-    pending: 'bg-transparent border-white/[0.12]',
+    done: 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300',
+    active: 'border-sky-400/40 bg-sky-500/15 text-sky-300',
+    failed: 'border-red-400/40 bg-red-500/15 text-red-200',
+    pending: 'border-white/[0.08] bg-white/[0.04] text-slate-500',
   }[status] || 'bg-transparent border-white/[0.12]';
 
   const nodeIcon = {
-    done: <Check size={10} className="text-white" strokeWidth={3} />,
-    active: null, // pulsing ring — no inner icon
-    failed: <X size={10} className="text-white" strokeWidth={3} />,
+    done: Icon ? <Icon size={16} strokeWidth={2.2} /> : <Check size={15} strokeWidth={2.8} />,
+    active: Icon ? <Icon size={16} strokeWidth={2.2} /> : null,
+    failed: Icon ? <Icon size={16} strokeWidth={2.2} /> : <X size={15} strokeWidth={2.8} />,
     pending: null,
   }[status];
 
   const labelColor = {
-    done: 'text-white',
+    done: 'text-slate-100',
     active: 'text-sky-300',
-    failed: 'text-red-400',
-    pending: 'text-gray-600',
-  }[status] || 'text-gray-600';
+    failed: 'text-red-700',
+    pending: 'text-slate-500',
+  }[status] || 'text-slate-500';
 
   return (
     <div className={`flex items-stretch gap-3 ${highlight ? 'relative' : ''}`}>
       {/* Left column: connector line + node */}
-      <div className="flex flex-col items-center flex-shrink-0 w-5">
+      <div className="flex w-10 flex-shrink-0 flex-col items-center">
         {/* Node circle */}
-        <div className={`relative w-5 h-5 rounded-full border-2 flex items-center justify-center z-10 mt-1 ${nodeStyle}`}>
+        <div className={`relative z-10 mt-0.5 flex h-9 w-9 items-center justify-center rounded-full border ${nodeStyle}`}>
           {nodeIcon}
           {/* Pulsing ring for active */}
           {status === 'active' && (
-            <div className="absolute inset-0 rounded-full border-2 border-sky-400 motion-reduce:hidden animate-ping opacity-60" />
+            <div className="absolute inset-0 rounded-full border border-sky-400 motion-reduce:hidden animate-ping opacity-60" />
           )}
         </div>
         {/* Connector line below */}
-        {!isLast && (
-          <div className="w-px flex-1 mt-1 bg-white/[0.07]" style={{ minHeight: '20px' }} />
-        )}
+        {!isLast && <div className="mt-2 w-px flex-1 bg-white/[0.08]" style={{ minHeight: '22px' }} />}
       </div>
 
       {/* Right column: label + detail */}
-      <div className={`flex-1 pb-5 ${isLast ? 'pb-2' : ''} ${highlight ? 'bg-emerald-500/[0.05] border border-emerald-500/15 rounded-xl px-3 py-2.5 -mt-1 mb-4' : ''}`}>
+      <div className={`flex-1 pb-5 ${isLast ? 'pb-2' : ''} ${highlight ? 'mb-4 -mt-1 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2.5' : ''}`}>
         <p className={`text-sm font-medium leading-snug ${labelColor}`}>
           {label}
         </p>
         {detail && (
-          <p className="text-gray-500 text-xs mt-1 leading-relaxed">{detail}</p>
+          <p className="mt-1 text-xs leading-relaxed text-slate-400">{detail}</p>
         )}
       </div>
     </div>

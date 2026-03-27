@@ -3,45 +3,77 @@
  *
  * Route: /broadcast/:id
  * Three sections:
- *   - Left: Patient list (logged by paramedic)
- *   - Center: Map (incident, hospitals, ambulances)
- *   - Right: Hospital responses + stats
+ *   - Left: Patient list
+ *   - Center: Map
+ *   - Right: Hospital responses
  *
  * Auto-refreshes every 5 seconds.
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import Map, { Marker, NavigationControl, Source, Layer } from 'react-map-gl/mapbox';
+import Map, { Marker, NavigationControl } from 'react-map-gl/mapbox';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import {
-  ArrowLeft, Radio, RefreshCw, Clock, Users, Check, X,
-  AlertTriangle, Loader2, ChevronDown, Zap, Building2
+  ArrowLeft, Radio, RefreshCw, Clock3, Users, Check, X,
+  AlertTriangle, Loader2, Zap, Building2, Ambulance, MapPin,
+  CircleDot, ClipboardList
 } from 'lucide-react';
 import api from '../lib/api';
 
 const SEVERITY_CONFIG = {
-  critical: { label: 'CRITICAL', color: 'bg-red-500', border: 'border-red-500/50', text: 'text-red-400', bg: 'bg-red-500/10' },
-  high:     { label: 'HIGH',     color: 'bg-amber-500', border: 'border-amber-500/50', text: 'text-amber-400', bg: 'bg-amber-500/10' },
-  medium:   { label: 'MEDIUM',   color: 'bg-yellow-500', border: 'border-yellow-500/50', text: 'text-yellow-400', bg: 'bg-yellow-500/10' },
-  low:      { label: 'LOW',      color: 'bg-green-500', border: 'border-green-500/50', text: 'text-green-400', bg: 'bg-green-500/10' },
-  deceased: { label: 'DECEASED', color: 'bg-gray-500', border: 'border-gray-500/50', text: 'text-gray-400', bg: 'bg-gray-500/10' },
+  critical: { label: 'Critical', badge: 'bg-red-50 text-red-600 border-red-100', dot: 'bg-red-500' },
+  high: { label: 'High', badge: 'bg-amber-50 text-amber-600 border-amber-100', dot: 'bg-amber-500' },
+  medium: { label: 'Medium', badge: 'bg-sky-50 text-sky-700 border-sky-100', dot: 'bg-sky-500' },
+  low: { label: 'Low', badge: 'bg-emerald-50 text-emerald-700 border-emerald-100', dot: 'bg-emerald-500' },
+  deceased: { label: 'Deceased', badge: 'bg-slate-100 text-slate-600 border-slate-200', dot: 'bg-slate-500' },
 };
 
 const STATUS_CONFIG = {
-  unassigned: { label: 'Unassigned', color: 'text-gray-400' },
-  assigned:   { label: 'Assigned',   color: 'text-cyan-400' },
-  en_route:   { label: 'En Route',   color: 'text-blue-400' },
-  arrived:    { label: 'Arrived',    color: 'text-emerald-400' },
-  admitted:   { label: 'Admitted',   color: 'text-emerald-400' },
+  unassigned: { label: 'Waiting', text: 'text-slate-500' },
+  assigned: { label: 'Assigned', text: 'text-sky-600' },
+  en_route: { label: 'In transit', text: 'text-blue-600' },
+  arrived: { label: 'Arrived', text: 'text-emerald-600' },
+  admitted: { label: 'Admitted', text: 'text-emerald-700' },
+};
+
+const HANDSHAKE_CONFIG = {
+  requested: { label: 'Hospital notified', text: 'text-amber-600' },
+  accepted: { label: 'Bed held', text: 'text-sky-700' },
+  completed: { label: 'Admitted', text: 'text-emerald-700' },
+  declined: { label: 'Declined', text: 'text-red-600' },
+  expired: { label: 'Expired', text: 'text-slate-500' },
+  overridden: { label: 'Overridden', text: 'text-red-600' },
 };
 
 function timeSince(iso) {
-  if (!iso) return '';
+  if (!iso) return '—';
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return 'Just now';
   if (mins < 60) return `${mins}m ago`;
   return `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+}
+
+function totalBedsFromResponse(response) {
+  return (
+    (response.icu_available || 0) +
+    (response.ward_available || 0) +
+    (response.emergency_available || 0) +
+    (response.surgical_available || 0) +
+    (response.maternity_available || 0) +
+    (response.pediatric_available || 0)
+  );
+}
+
+function bedSummary(response) {
+  const items = [];
+  if (response.icu_available > 0) items.push(`ICU ${response.icu_available}`);
+  if (response.emergency_available > 0) items.push(`Emergency ${response.emergency_available}`);
+  if (response.ward_available > 0) items.push(`Ward ${response.ward_available}`);
+  if (response.surgical_available > 0) items.push(`Surgical ${response.surgical_available}`);
+  if (response.maternity_available > 0) items.push(`Maternity ${response.maternity_available}`);
+  if (response.pediatric_available > 0) items.push(`Pediatric ${response.pediatric_available}`);
+  return items;
 }
 
 export default function BroadcastDashboard() {
@@ -50,35 +82,34 @@ export default function BroadcastDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedPatient, setSelectedPatient] = useState(null);
-  const [assigningTo, setAssigningTo] = useState(null); // hospital_id being assigned to
   const [actionLoading, setActionLoading] = useState({});
-  const [patientFilter, setPatientFilter] = useState('all'); // all, unassigned, assigned
+  const [patientFilter, setPatientFilter] = useState('all');
   const [autoDistPreview, setAutoDistPreview] = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(null);
   const mapRef = useRef(null);
   const intervalRef = useRef(null);
 
-  // Fetch data
-  async function fetchData() {
+  const fetchData = useCallback(async () => {
     try {
       const res = await api.get(`/api/broadcast/${id}`);
       setData(res.data);
+      setLastRefresh(new Date());
       setError(null);
-    } catch (err) {
+    } catch {
       setError('Failed to load broadcast data.');
     } finally {
       setLoading(false);
     }
-  }
+  }, [id]);
 
   useEffect(() => {
     fetchData();
     intervalRef.current = setInterval(fetchData, 5000);
     return () => clearInterval(intervalRef.current);
-  }, [id]);
+  }, [fetchData]);
 
-  // Assign patient to hospital
   async function handleAssign(patientId, hospitalId) {
-    setActionLoading(prev => ({ ...prev, [`assign_${patientId}`]: true }));
+    setActionLoading((prev) => ({ ...prev, [`assign_${patientId}`]: true }));
     try {
       await api.post(`/api/broadcast/patients/${patientId}/assign`, {
         hospital_id: hospitalId,
@@ -88,13 +119,12 @@ export default function BroadcastDashboard() {
     } catch (err) {
       console.error('Assignment failed:', err);
     } finally {
-      setActionLoading(prev => ({ ...prev, [`assign_${patientId}`]: false }));
+      setActionLoading((prev) => ({ ...prev, [`assign_${patientId}`]: false }));
     }
   }
 
-  // Auto-distribute
   async function handleAutoDistribute(confirm = false) {
-    setActionLoading(prev => ({ ...prev, auto: true }));
+    setActionLoading((prev) => ({ ...prev, auto: true }));
     try {
       const res = await api.post(`/api/broadcast/${id}/auto-distribute`, { confirm });
       if (confirm) {
@@ -106,11 +136,10 @@ export default function BroadcastDashboard() {
     } catch (err) {
       console.error('Auto-distribute failed:', err);
     } finally {
-      setActionLoading(prev => ({ ...prev, auto: false }));
+      setActionLoading((prev) => ({ ...prev, auto: false }));
     }
   }
 
-  // Resolve broadcast
   async function handleResolve() {
     try {
       await api.patch(`/api/broadcast/${id}`, { status: 'resolved' });
@@ -120,14 +149,12 @@ export default function BroadcastDashboard() {
     }
   }
 
-  // Dispatch ambulance — triggers route simulation
   async function handleDispatch(patientId) {
-    setActionLoading(prev => ({ ...prev, [`dispatch_${patientId}`]: true }));
+    setActionLoading((prev) => ({ ...prev, [`dispatch_${patientId}`]: true }));
     try {
       const res = await api.post(`/api/broadcast/patients/${patientId}/simulate-route`);
       const { waypoints } = res.data;
 
-      // Simulate movement: call PATCH /position with each waypoint every 5 seconds
       if (waypoints && waypoints.length > 0) {
         let idx = 0;
         const interval = setInterval(async () => {
@@ -140,8 +167,10 @@ export default function BroadcastDashboard() {
               lat: waypoints[idx].lat,
               lng: waypoints[idx].lng,
             });
-          } catch (_) {}
-          idx++;
+          } catch {
+            // Keep the simulation lightweight if a single update fails.
+          }
+          idx += 1;
         }, 5000);
       }
 
@@ -149,16 +178,18 @@ export default function BroadcastDashboard() {
     } catch (err) {
       console.error('Dispatch failed:', err);
     } finally {
-      setActionLoading(prev => ({ ...prev, [`dispatch_${patientId}`]: false }));
+      setActionLoading((prev) => ({ ...prev, [`dispatch_${patientId}`]: false }));
     }
   }
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-[#eef2f7]">
         <div className="text-center">
-          <div className="w-10 h-10 border-2 border-red-400/30 border-t-red-400 rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-gray-400 text-sm">Loading broadcast...</p>
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-white shadow-sm">
+            <RefreshCw size={18} className="animate-spin text-slate-700" />
+          </div>
+          <p className="text-sm text-slate-500">Loading broadcast dashboard...</p>
         </div>
       </div>
     );
@@ -166,11 +197,13 @@ export default function BroadcastDashboard() {
 
   if (error || !data) {
     return (
-      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center">
-        <div className="text-center">
-          <AlertTriangle size={40} className="text-red-400 mx-auto mb-3" />
-          <p className="text-white mb-2">{error || 'Broadcast not found'}</p>
-          <Link to="/" className="text-cyan-400 text-sm hover:underline">Back to Pulse Map</Link>
+      <div className="flex min-h-screen items-center justify-center bg-[#eef2f7] p-6">
+        <div className="rounded-[28px] border border-slate-200 bg-white px-8 py-10 text-center shadow-sm">
+          <AlertTriangle size={40} className="mx-auto mb-3 text-red-500" />
+          <p className="mb-1 text-lg font-medium text-slate-900">{error || 'Broadcast not found'}</p>
+          <Link to="/" className="mt-4 inline-block text-sm font-medium text-sky-600 hover:underline">
+            Go to Pulse Map
+          </Link>
         </div>
       </div>
     );
@@ -179,488 +212,468 @@ export default function BroadcastDashboard() {
   const { broadcast, responses, patients, total_capacity, patient_stats } = data;
   const isActive = broadcast.status === 'active';
 
-  // Filter patients
-  const filteredPatients = patients.filter(p => {
-    if (patientFilter === 'unassigned') return p.status === 'unassigned';
-    if (patientFilter === 'assigned') return p.status !== 'unassigned';
+  const filteredPatients = patients.filter((patient) => {
+    if (patientFilter === 'unassigned') return patient.status === 'unassigned';
+    if (patientFilter === 'assigned') return patient.status !== 'unassigned';
     return true;
   });
 
-  // Responding hospitals for assignment
   const respondingHospitals = responses
-    .filter(r => r.status === 'responded')
-    .map(r => ({
-      ...r,
-      hospital: r.hospitals || {},
+    .filter((response) => response.status === 'responded')
+    .map((response) => ({
+      ...response,
+      hospital: response.hospitals || {},
     }));
 
   return (
-    <div className="h-screen bg-[#0a0f1a] flex flex-col overflow-hidden">
-      {/* ── Top Bar ───────────────────────────────────── */}
-      <div className="border-b border-gray-800/50 px-4 py-2.5 flex items-center justify-between bg-[#0a0f1a]/95 backdrop-blur-sm z-10">
-        <div className="flex items-center gap-3">
-          <Link to="/" className="text-gray-500 hover:text-white transition-colors">
-            <ArrowLeft size={18} />
-          </Link>
-          <div className="flex items-center gap-2">
-            <Radio size={14} className={isActive ? 'text-red-400 animate-pulse' : 'text-gray-500'} />
-            <h1 className="text-white text-sm font-semibold">{broadcast.title}</h1>
-            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-              isActive ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-400'
-            }`}>
-              {broadcast.status.toUpperCase()}
-            </span>
-          </div>
-        </div>
+    <div className="min-h-screen bg-[#eef2f7] px-4 py-6 text-slate-900">
+      <div className="mx-auto max-w-[1460px]">
+        <div className="rounded-[36px] border border-black/5 bg-[#141414] p-4 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+          <div className="rounded-[30px] bg-[#f7f8fb] p-3 sm:p-4">
+            <TopBar
+              broadcast={broadcast}
+              id={id}
+              isActive={isActive}
+              lastRefresh={lastRefresh}
+              onResolve={handleResolve}
+            />
 
-        {/* Stats */}
-        <div className="flex items-center gap-4 text-[10px]">
-          <span className="text-gray-400 flex items-center gap-1">
-            <Clock size={10} /> {timeSince(broadcast.created_at)}
-          </span>
-          <span className="text-cyan-400 flex items-center gap-1">
-            <Building2 size={10} /> {broadcast.hospitals_responded}/{broadcast.hospitals_pinged} responded
-          </span>
-          <span className="text-white flex items-center gap-1">
-            <Users size={10} /> {patient_stats.total} patients
-          </span>
-          <span className="text-emerald-400">{patient_stats.by_status.assigned + patient_stats.by_status.en_route + patient_stats.by_status.arrived} assigned</span>
-          <span className="text-gray-500">{patient_stats.by_status.unassigned} pending</span>
+            <div className="mt-4 space-y-4">
+              <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Broadcast</p>
+                    <h1 className="mt-2 text-[1.7rem] font-semibold tracking-tight text-slate-950">{broadcast.title}</h1>
+                    <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                      Track patients, assign hospitals, and coordinate transport from one shared incident view.
+                    </p>
+                  </div>
 
-          <div className="flex items-center gap-2 ml-2">
-            <Link
-              to={`/broadcast/${id}/log`}
-              className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-400 text-[10px] font-medium px-2.5 py-1 rounded-lg transition-all"
-            >
-              + Log Patient
-            </Link>
-            {isActive && (
-              <button
-                onClick={handleResolve}
-                className="bg-gray-700/50 hover:bg-gray-700 text-gray-300 text-[10px] font-medium px-2.5 py-1 rounded-lg transition-all"
-              >
-                Resolve
-              </button>
-            )}
-          </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <HeaderInfoCard
+                      icon={Building2}
+                      label="Hospital replies"
+                      value={`${broadcast.hospitals_responded}/${broadcast.hospitals_pinged}`}
+                      sub="Hospitals that have replied so far"
+                    />
+                    <HeaderInfoCard
+                      icon={Clock3}
+                      label="Started"
+                      value={timeSince(broadcast.created_at)}
+                      sub="Refreshes every 5 seconds"
+                    />
+                  </div>
+                </div>
 
-          <div className="flex items-center gap-1">
-            <RefreshCw size={8} className="text-gray-600 animate-spin" style={{ animationDuration: '5s' }} />
-            <span className="text-gray-600 text-[9px]">Live</span>
-          </div>
-        </div>
-      </div>
+                <div className="mt-5 grid gap-3 lg:grid-cols-4">
+                  <SummaryCard label="Patients" value={patient_stats.total} sub="People logged at this incident" tone="sky" icon={Users} />
+                  <SummaryCard
+                    label="Assigned"
+                    value={(patient_stats.by_status.assigned || 0) + (patient_stats.by_status.en_route || 0) + (patient_stats.by_status.arrived || 0)}
+                    sub="Already matched to a hospital"
+                    tone="emerald"
+                    icon={ClipboardList}
+                  />
+                  <SummaryCard label="Waiting" value={patient_stats.by_status.unassigned || 0} sub="Still needs a hospital" tone="amber" icon={AlertTriangle} />
+                  <SummaryCard label="Responding hospitals" value={respondingHospitals.length} sub="Currently offering capacity" tone="slate" icon={Building2} />
+                </div>
+              </section>
 
-      {/* ── Main Content ──────────────────────────────── */}
-      <div className="flex-1 flex overflow-hidden">
-
-        {/* ── Left: Patient List ────────────────────────── */}
-        <div className="w-[320px] border-r border-gray-800/50 flex flex-col">
-          <div className="p-3 border-b border-gray-800/50">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-white text-xs font-semibold">Patients ({filteredPatients.length})</h2>
-              {patient_stats.by_status.unassigned > 0 && isActive && (
-                <button
-                  onClick={() => handleAutoDistribute(false)}
-                  disabled={actionLoading.auto}
-                  className="bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-cyan-400 text-[10px] font-medium px-2 py-1 rounded transition-all flex items-center gap-1"
-                >
-                  {actionLoading.auto ? <Loader2 size={10} className="animate-spin" /> : <Zap size={10} />}
-                  Auto-Assign
-                </button>
-              )}
-            </div>
-            <div className="flex gap-1">
-              {['all', 'unassigned', 'assigned'].map(f => (
-                <button
-                  key={f}
-                  onClick={() => setPatientFilter(f)}
-                  className={`flex-1 py-1 rounded text-[10px] font-medium transition-all ${
-                    patientFilter === f
-                      ? 'bg-gray-700 text-white'
-                      : 'text-gray-500 hover:text-gray-300'
-                  }`}
-                >
-                  {f.charAt(0).toUpperCase() + f.slice(1)}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-            {filteredPatients.length === 0 ? (
-              <div className="text-center py-8">
-                <p className="text-gray-600 text-xs">No patients logged yet</p>
-                <Link
-                  to={`/broadcast/${id}/log`}
-                  className="text-amber-400 text-xs mt-2 inline-block hover:underline"
-                >
-                  Open patient log
-                </Link>
-              </div>
-            ) : (
-              filteredPatients.map(p => {
-                const sev = SEVERITY_CONFIG[p.severity] || SEVERITY_CONFIG.medium;
-                const stat = STATUS_CONFIG[p.status] || STATUS_CONFIG.unassigned;
-                const isSelected = selectedPatient?.id === p.id;
-                const hsStatus = p._handshake_status;
-                const transferCode = p._transfer_code;
-
-                // Handshake status display
-                const HS_DISPLAY = {
-                  requested: { label: 'Notified', color: 'text-amber-400', icon: '📤' },
-                  accepted:  { label: 'Bed Held', color: 'text-cyan-400', icon: '🛏' },
-                  completed: { label: 'Admitted', color: 'text-emerald-400', icon: '✅' },
-                  declined:  { label: 'Declined', color: 'text-red-400', icon: '❌' },
-                  expired:   { label: 'Expired', color: 'text-gray-400', icon: '⏰' },
-                  overridden:{ label: 'Overridden', color: 'text-red-400', icon: '🔄' },
-                };
-                const hsDisplay = hsStatus ? HS_DISPLAY[hsStatus] : null;
-
-                return (
-                  <div
-                    key={p.id}
-                    className={`w-full text-left p-2.5 rounded-lg border transition-all ${
-                      isSelected
-                        ? `${sev.bg} ${sev.border}`
-                        : 'bg-[#151d2e] border-gray-800/50 hover:border-gray-700'
-                    }`}
-                  >
-                    {/* Header row */}
-                    <div className="flex items-center justify-between mb-1">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`w-2 h-2 rounded-full ${sev.color}`} />
-                        <span className="text-white text-xs font-mono font-bold">{p.tag_number}</span>
-                        <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${sev.bg} ${sev.text}`}>
-                          {sev.label}
+              <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)_320px]">
+                <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                  <div className="border-b border-slate-100 pb-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <p className="text-base font-semibold text-slate-950">Patients</p>
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600">
+                          {filteredPatients.length}
                         </span>
                       </div>
-                      <span className={`text-[9px] ${stat.color}`}>{stat.label}</span>
-                    </div>
-
-                    {/* Condition */}
-                    {p.condition_notes && (
-                      <p className="text-gray-400 text-[10px] line-clamp-1 mb-1">{p.condition_notes}</p>
-                    )}
-
-                    {/* Handshake status (if assigned) */}
-                    {hsDisplay && (
-                      <div className="flex items-center gap-1.5 mb-1.5">
-                        <span className="text-[10px]">{hsDisplay.icon}</span>
-                        <span className={`text-[10px] font-medium ${hsDisplay.color}`}>{hsDisplay.label}</span>
-                        {transferCode && (
-                          <span className="text-gray-600 text-[9px] font-mono">{transferCode}</span>
-                        )}
-                        {p._hold_remaining_sec > 0 && (
-                          <span className="text-cyan-400 text-[9px] font-mono ml-auto">
-                            {Math.floor(p._hold_remaining_sec / 60)}:{String(p._hold_remaining_sec % 60).padStart(2, '0')}
-                          </span>
-                        )}
-                        {p._declined_reason && (
-                          <span className="text-gray-600 text-[9px] ml-auto truncate max-w-[100px]">
-                            ({p._declined_reason})
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Hospital assignment */}
-                    {p.assigned_hospital_id && p.hospitals && (
-                      <p className="text-cyan-400/60 text-[10px] mb-1.5">→ {p.hospitals.name}</p>
-                    )}
-
-                    {/* Dispatch button (for assigned patients not yet en_route) */}
-                    {p.status === 'assigned' && isActive && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleDispatch(p.id); }}
-                        disabled={actionLoading[`dispatch_${p.id}`]}
-                        className="w-full mt-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-400 text-[10px] font-medium py-1.5 rounded-lg transition-all flex items-center justify-center gap-1"
-                      >
-                        {actionLoading[`dispatch_${p.id}`] ? <Loader2 size={10} className="animate-spin" /> : '🚑'}
-                        Dispatch Ambulance
-                      </button>
-                    )}
-
-                    {/* ETA display for en_route */}
-                    {p.status === 'en_route' && (
-                      <div className="mt-1.5 flex items-center justify-between">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-blue-400 text-[10px]">🚑</span>
-                          <span className="text-blue-400 text-[10px] font-medium">
-                            En route{p.eta_minutes ? ` — ~${p.eta_minutes} min` : ''}
-                          </span>
-                        </div>
-                        <a
-                          href={`/ambulance/${p.id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={e => e.stopPropagation()}
-                          className="text-blue-400 text-[9px] hover:underline"
+                      {patient_stats.by_status.unassigned > 0 && isActive ? (
+                        <button
+                          type="button"
+                          onClick={() => handleAutoDistribute(false)}
+                          disabled={actionLoading.auto}
+                          className="inline-flex min-h-[38px] items-center gap-2 rounded-full bg-slate-950 px-3 text-xs font-medium text-white transition hover:bg-slate-800"
                         >
-                          Track →
-                        </a>
-                      </div>
-                    )}
-
-                    {/* Quick-assign dropdown (for unassigned patients) */}
-                    {p.status === 'unassigned' && isActive && respondingHospitals.length > 0 && (
-                      <QuickAssignDropdown
-                        hospitals={respondingHospitals}
-                        loading={actionLoading[`assign_${p.id}`]}
-                        onAssign={(hospitalId) => handleAssign(p.id, hospitalId)}
-                        onMapAssign={() => setSelectedPatient(p)}
-                      />
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        {/* ── Center: Map ───────────────────────────────── */}
-        <div className="flex-1 relative">
-          <Map
-            ref={mapRef}
-            mapboxAccessToken={import.meta.env.VITE_MAPBOX_TOKEN}
-            initialViewState={{ latitude: broadcast.lat, longitude: broadcast.lng, zoom: 12 }}
-            style={{ width: '100%', height: '100%' }}
-            mapStyle="mapbox://styles/mapbox/dark-v11"
-          >
-            <NavigationControl position="bottom-right" showCompass={false} />
-
-            {/* Incident marker */}
-            <Marker latitude={broadcast.lat} longitude={broadcast.lng} anchor="center">
-              <div className="relative">
-                <div
-                  className="absolute rounded-full"
-                  style={{ width: 44, height: 44, top: -16, left: -16, backgroundColor: 'rgba(239,68,68,0.2)', animation: 'incident-pulse 1.5s ease-out infinite' }}
-                />
-                <div style={{ width: 14, height: 14, backgroundColor: '#ef4444', borderRadius: '50%', border: '3px solid white', boxShadow: '0 0 12px rgba(239,68,68,0.6)' }} />
-              </div>
-            </Marker>
-
-            {/* Responding hospital markers */}
-            {respondingHospitals.map(r => {
-              const h = r.hospital;
-              if (!r._hospital_lat) return null;
-              const totalBeds = (r.icu_available || 0) + (r.ward_available || 0) + (r.emergency_available || 0) + (r.surgical_available || 0);
-              return (
-                <Marker key={r.id} latitude={r._hospital_lat} longitude={r._hospital_lng} anchor="center">
-                  <div
-                    className="bg-white rounded-lg px-2 py-1 border border-gray-200 shadow-md cursor-pointer flex items-center gap-1.5"
-                    onClick={() => {
-                      if (selectedPatient && selectedPatient.status === 'unassigned') {
-                        handleAssign(selectedPatient.id, h.id);
-                      }
-                    }}
-                    style={{
-                      outline: selectedPatient?.status === 'unassigned' ? '2px solid #06b6d4' : 'none',
-                      outlineOffset: '2px',
-                    }}
-                  >
-                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                    <span className="text-[10px] font-bold text-gray-800">{totalBeds}</span>
-                  </div>
-                </Marker>
-              );
-            })}
-
-            {/* Ambulance markers */}
-            {patients.filter(p => p.ambulance_lat && (p.status === 'en_route' || p.status === 'assigned')).map(p => (
-              <Marker key={`amb-${p.id}`} latitude={p.ambulance_lat} longitude={p.ambulance_lng} anchor="center">
-                <div className="flex flex-col items-center">
-                  <div className="bg-blue-500 text-white text-[8px] font-bold px-1.5 py-0.5 rounded shadow-lg shadow-blue-500/30 whitespace-nowrap mb-0.5">
-                    {p.tag_number}{p.hospitals ? ` → ${p.hospitals.name.slice(0, 12)}` : ''}
-                  </div>
-                  <div className="relative">
-                    <div
-                      className="absolute rounded-full"
-                      style={{ width: 28, height: 28, top: -8, left: -8, backgroundColor: 'rgba(59,130,246,0.2)', animation: 'incident-pulse 2s ease-out infinite' }}
-                    />
-                    <div style={{ width: 12, height: 12, backgroundColor: '#3b82f6', borderRadius: '50%', border: '2px solid white', boxShadow: '0 0 6px rgba(59,130,246,0.5)' }} />
-                  </div>
-                </div>
-              </Marker>
-            ))}
-          </Map>
-
-          <style>{`
-            @keyframes incident-pulse {
-              0% { transform: scale(1); opacity: 0.5; }
-              100% { transform: scale(3); opacity: 0; }
-            }
-          `}</style>
-
-          {/* Assignment instruction overlay */}
-          {selectedPatient && selectedPatient.status === 'unassigned' && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-cyan-500/10 backdrop-blur-sm border border-cyan-500/30 rounded-xl px-4 py-2 flex items-center gap-2">
-              <Zap size={14} className="text-cyan-400" />
-              <p className="text-cyan-300 text-xs">
-                Click a hospital on the map to assign <span className="font-mono font-bold">{selectedPatient.tag_number}</span>
-              </p>
-              <button onClick={() => setSelectedPatient(null)} className="text-gray-500 hover:text-white ml-2">
-                <X size={14} />
-              </button>
-            </div>
-          )}
-
-          {/* Evidence images */}
-          {broadcast.images && broadcast.images.length > 0 && (
-            <div className="absolute bottom-3 left-3 z-10 flex gap-2">
-              {broadcast.images.map((img, i) => (
-                <div key={i} className="w-16 h-16 rounded-lg overflow-hidden border border-gray-700/50 shadow-lg">
-                  <img src={img} alt="" className="w-full h-full object-cover" />
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* ── Right: Hospital Responses ──────────────────── */}
-        <div className="w-[300px] border-l border-gray-800/50 flex flex-col">
-          {/* Capacity summary */}
-          <div className="p-3 border-b border-gray-800/50">
-            <h2 className="text-white text-xs font-semibold mb-2">Available Capacity</h2>
-            <div className="grid grid-cols-3 gap-1.5">
-              {Object.entries(total_capacity).map(([type, count]) => (
-                <div key={type} className="bg-[#151d2e] rounded-lg p-1.5 text-center">
-                  <p className={`text-sm font-bold ${count > 0 ? 'text-emerald-400' : 'text-gray-600'}`}>{count}</p>
-                  <p className="text-gray-500 text-[8px] uppercase">{type.replace('_', ' ')}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Hospital responses */}
-          <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-            <h3 className="text-gray-400 text-[10px] font-medium px-1">
-              Responses ({responses.length})
-            </h3>
-            {responses.length === 0 ? (
-              <p className="text-gray-600 text-xs text-center py-6">Waiting for hospitals to respond...</p>
-            ) : (
-              responses.map(r => {
-                const h = r.hospitals || {};
-                const isDeclined = r.status === 'declined';
-                const totalBeds = (r.icu_available || 0) + (r.ward_available || 0) + (r.emergency_available || 0) + (r.surgical_available || 0) + (r.maternity_available || 0) + (r.pediatric_available || 0);
-
-                return (
-                  <div
-                    key={r.id}
-                    className={`bg-[#151d2e] rounded-lg p-2.5 border ${
-                      isDeclined ? 'border-gray-800/50 opacity-50' : 'border-gray-800/50'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <h4 className="text-white text-xs font-medium truncate flex-1">{h.name || 'Unknown'}</h4>
-                      {r._distance && (
-                        <span className="text-gray-500 text-[10px] ml-1">{r._distance}km</span>
-                      )}
+                          {actionLoading.auto ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+                          Auto-assign
+                        </button>
+                      ) : null}
                     </div>
-                    {isDeclined ? (
-                      <p className="text-gray-500 text-[10px]">Unable to help</p>
-                    ) : (
-                      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
-                        {r.icu_available > 0 && <span className="text-[9px] text-emerald-400">ICU: {r.icu_available}</span>}
-                        {r.ward_available > 0 && <span className="text-[9px] text-emerald-400">Ward: {r.ward_available}</span>}
-                        {r.emergency_available > 0 && <span className="text-[9px] text-emerald-400">Emerg: {r.emergency_available}</span>}
-                        {r.surgical_available > 0 && <span className="text-[9px] text-emerald-400">Surg: {r.surgical_available}</span>}
-                        {r.maternity_available > 0 && <span className="text-[9px] text-emerald-400">Mat: {r.maternity_available}</span>}
-                        {r.pediatric_available > 0 && <span className="text-[9px] text-emerald-400">Ped: {r.pediatric_available}</span>}
-                        {totalBeds === 0 && <span className="text-[9px] text-gray-500">No beds reported</span>}
-                      </div>
-                    )}
+                    <p className="mt-1 text-sm text-slate-500">Stacked incident feed for patient matching.</p>
+                    <div className="mt-4 inline-flex rounded-full bg-slate-100 p-1">
+                      {['all', 'unassigned', 'assigned'].map((filter) => (
+                        <button
+                          key={filter}
+                          type="button"
+                          onClick={() => setPatientFilter(filter)}
+                          className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                            patientFilter === filter ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                          }`}
+                        >
+                          {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                );
-              })
-            )}
+
+                  {filteredPatients.length === 0 ? (
+                    <div className="py-16 text-center text-sm text-slate-500">
+                      No patients logged yet.
+                      <Link to={`/broadcast/${id}/log`} className="ml-1 font-medium text-sky-600 hover:underline">
+                        Open patient log
+                      </Link>
+                    </div>
+                  ) : (
+                    <div className="mt-5 max-h-[calc(100vh-360px)] space-y-3 overflow-y-auto pr-1">
+                      {filteredPatients.map((patient) => (
+                        <PatientCard
+                          key={patient.id}
+                          patient={patient}
+                          isActive={isActive}
+                          isSelected={selectedPatient?.id === patient.id}
+                          hospitals={respondingHospitals}
+                          loadingAssign={actionLoading[`assign_${patient.id}`]}
+                          loadingDispatch={actionLoading[`dispatch_${patient.id}`]}
+                          onAssign={handleAssign}
+                          onDispatch={handleDispatch}
+                          onMapAssign={() => setSelectedPatient(patient)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="rounded-[28px] bg-white p-4 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-1 pb-4">
+                    <div>
+                      <p className="text-base font-semibold text-slate-950">Incident map</p>
+                      <p className="mt-1 text-sm text-slate-500">Patients, responding hospitals, and live ambulance movement.</p>
+                    </div>
+                    {selectedPatient && selectedPatient.status === 'unassigned' ? (
+                      <div className="inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700">
+                        <Zap size={12} />
+                        Assigning {selectedPatient.tag_number}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="relative mt-4 overflow-hidden rounded-[24px] border border-slate-200 bg-slate-100">
+                    <Map
+                      ref={mapRef}
+                      mapboxAccessToken={import.meta.env.VITE_MAPBOX_TOKEN}
+                      initialViewState={{ latitude: broadcast.lat, longitude: broadcast.lng, zoom: 12 }}
+                      style={{ width: '100%', height: 'min(70vh, 780px)' }}
+                      mapStyle="mapbox://styles/mapbox/light-v11"
+                    >
+                      <NavigationControl position="bottom-right" showCompass={false} />
+
+                      <Marker latitude={broadcast.lat} longitude={broadcast.lng} anchor="center">
+                        <div className="flex flex-col items-center">
+                          <div className="mb-1 rounded-full bg-red-600 px-2 py-1 text-[10px] font-semibold text-white shadow-lg">
+                            Incident
+                          </div>
+                          <div className="relative">
+                            <div
+                              className="absolute rounded-full"
+                              style={{ width: 48, height: 48, top: -18, left: -18, backgroundColor: 'rgba(239,68,68,0.16)', animation: 'incident-pulse 1.6s ease-out infinite' }}
+                            />
+                            <div style={{ width: 14, height: 14, backgroundColor: '#dc2626', borderRadius: '50%', border: '3px solid white', boxShadow: '0 0 12px rgba(220,38,38,0.3)' }} />
+                          </div>
+                        </div>
+                      </Marker>
+
+                      {respondingHospitals.map((response) => {
+                        const hospital = response.hospital;
+                        if (!response._hospital_lat) return null;
+                        const totalBeds = totalBedsFromResponse(response);
+                        return (
+                          <Marker key={response.id} latitude={response._hospital_lat} longitude={response._hospital_lng} anchor="center">
+                            <button
+                              type="button"
+                              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-800 shadow-md transition hover:border-sky-300 hover:text-sky-700"
+                              onClick={() => {
+                                if (selectedPatient?.status === 'unassigned') handleAssign(selectedPatient.id, hospital.id);
+                              }}
+                            >
+                              {hospital.name?.slice(0, 12) || 'Hospital'} · {totalBeds}
+                            </button>
+                          </Marker>
+                        );
+                      })}
+
+                      {patients.filter((patient) => patient.ambulance_lat && (patient.status === 'en_route' || patient.status === 'assigned')).map((patient) => (
+                        <Marker key={`amb-${patient.id}`} latitude={patient.ambulance_lat} longitude={patient.ambulance_lng} anchor="center">
+                          <div className="flex flex-col items-center">
+                            <div className="mb-1 rounded-full bg-sky-600 px-2 py-1 text-[10px] font-semibold text-white shadow-lg">
+                              {patient.tag_number}
+                            </div>
+                            <div className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white bg-sky-500 text-white shadow-lg">
+                              <Ambulance size={14} />
+                            </div>
+                          </div>
+                        </Marker>
+                      ))}
+                    </Map>
+
+                    <style>{`
+                      @keyframes incident-pulse {
+                        0% { transform: scale(1); opacity: 0.55; }
+                        100% { transform: scale(3); opacity: 0; }
+                      }
+                    `}</style>
+
+                    {selectedPatient && selectedPatient.status === 'unassigned' ? (
+                      <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-full border border-sky-200 bg-white px-4 py-2 text-sm font-medium text-sky-700 shadow-lg">
+                        Click a hospital marker to assign {selectedPatient.tag_number}
+                      </div>
+                    ) : null}
+
+                    {broadcast.images && broadcast.images.length > 0 ? (
+                      <div className="absolute bottom-3 left-3 z-10 flex gap-2">
+                        {broadcast.images.map((image, index) => (
+                          <div key={index} className="h-16 w-16 overflow-hidden rounded-2xl border border-white/70 bg-white shadow-lg">
+                            <img src={image} alt="" className="h-full w-full object-cover" />
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </section>
+
+                <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                  <div className="border-b border-slate-100 pb-4">
+                    <div className="flex items-center gap-2">
+                      <p className="text-base font-semibold text-slate-950">Hospital responses</p>
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600">
+                        {responses.length}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-slate-500">Live capacity replies from hospitals near the incident.</p>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
+                    {Object.entries(total_capacity).map(([type, count]) => (
+                      <CapacityMiniCard key={type} label={type.replace(/_/g, ' ')} value={count} />
+                    ))}
+                  </div>
+
+                  {responses.length === 0 ? (
+                    <div className="py-16 text-center text-sm text-slate-500">Waiting for hospitals to respond...</div>
+                  ) : (
+                    <div className="mt-5 max-h-[calc(100vh-420px)] space-y-3 overflow-y-auto pr-1">
+                      {responses.map((response) => (
+                        <ResponseCard key={response.id} response={response} />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* ── Auto-Distribute Preview Modal ─────────────── */}
-      {autoDistPreview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => setAutoDistPreview(null)}>
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-          <div className="relative bg-[#0d1320] border border-gray-700/50 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="p-5 pb-3 border-b border-gray-800/50">
-              <h3 className="text-white text-sm font-semibold flex items-center gap-2">
-                <Zap size={14} className="text-cyan-400" />
-                Auto-Distribute Preview
-              </h3>
-              <p className="text-gray-500 text-xs mt-0.5">
-                {autoDistPreview.assigned_count} of {autoDistPreview.assignments?.length} patients can be assigned
-              </p>
-            </div>
-            <div className="p-5 max-h-[50vh] overflow-y-auto space-y-1.5">
-              {autoDistPreview.assignments?.map((a, i) => {
-                const sev = SEVERITY_CONFIG[a.severity] || SEVERITY_CONFIG.medium;
-                return (
-                  <div key={i} className="flex items-center justify-between bg-[#151d2e] rounded-lg p-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${sev.color}`} />
-                      <span className="text-white text-xs font-mono">{a.tag_number}</span>
-                      <span className={`text-[9px] ${sev.text}`}>{sev.label}</span>
-                    </div>
-                    <div className="text-right">
-                      {a.hospital_id ? (
-                        <p className="text-cyan-400 text-[10px]">→ {a.hospital_name}</p>
-                      ) : (
-                        <p className="text-red-400 text-[10px]">No match found</p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="p-5 pt-3 border-t border-gray-800/50 flex gap-2">
-              <button
-                onClick={() => setAutoDistPreview(null)}
-                className="flex-1 bg-[#151d2e] hover:bg-[#1a2435] text-gray-300 text-sm font-medium py-2.5 rounded-lg transition-all"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => handleAutoDistribute(true)}
-                disabled={actionLoading.auto}
-                className="flex-1 bg-cyan-500 hover:bg-cyan-400 text-white text-sm font-medium py-2.5 rounded-lg transition-all flex items-center justify-center gap-2"
-              >
-                {actionLoading.auto ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                Confirm ({autoDistPreview.assigned_count})
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {autoDistPreview ? (
+        <AutoDistributeModal
+          preview={autoDistPreview}
+          loading={actionLoading.auto}
+          onClose={() => setAutoDistPreview(null)}
+          onConfirm={() => handleAutoDistribute(true)}
+        />
+      ) : null}
     </div>
   );
 }
 
+function TopBar({ broadcast, id, isActive, lastRefresh, onResolve }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-wrap items-center gap-3">
+        <Link to="/" className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
+          <ArrowLeft size={16} />
+        </Link>
+        <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
+          <Radio size={13} className={isActive ? 'text-red-400' : 'text-slate-400'} />
+          Broadcast
+        </div>
+        <span className={`rounded-full px-3 py-2 text-xs font-medium ${isActive ? 'bg-red-500/15 text-red-300' : 'bg-white/[0.06] text-slate-300'}`}>
+          {broadcast.status}
+        </span>
+      </div>
 
-// ── Quick Assign Dropdown ────────────────────────────
+      <div className="flex flex-wrap items-center gap-3">
+        <Link
+          to={`/broadcast/${id}/log`}
+          className="inline-flex min-h-[40px] items-center gap-2 rounded-full bg-white/8 px-4 text-sm font-medium text-slate-200 transition hover:bg-white/12"
+        >
+          Log patient
+        </Link>
+        {isActive ? (
+          <button
+            type="button"
+            onClick={onResolve}
+            className="inline-flex min-h-[40px] items-center gap-2 rounded-full bg-white px-4 text-sm font-medium text-slate-900 transition hover:bg-slate-100"
+          >
+            Resolve incident
+          </button>
+        ) : null}
+        <div className="text-right text-xs text-slate-400">
+          <p className="font-medium text-slate-300">Updated {lastRefresh ? timeSince(lastRefresh.toISOString()) : '—'}</p>
+          <p className="mt-0.5 inline-flex items-center gap-1">
+            <RefreshCw size={11} className="animate-spin" style={{ animationDuration: '5s' }} />
+            Live
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HeaderInfoCard({ icon, label, value, sub }) {
+  const IconComponent = icon;
+
+  return (
+    <div className="min-w-[180px] rounded-[22px] border border-slate-100 bg-slate-50/80 px-4 py-3">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-slate-700 shadow-sm">
+          <IconComponent size={16} />
+        </div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
+          <p className="mt-1 truncate text-sm font-semibold text-slate-950">{value}</p>
+          <p className="mt-1 text-xs text-slate-500">{sub}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({ label, value, sub, tone, icon }) {
+  const IconComponent = icon;
+  const tones = {
+    sky: 'bg-sky-50 text-sky-600',
+    emerald: 'bg-emerald-50 text-emerald-600',
+    amber: 'bg-amber-50 text-amber-600',
+    slate: 'bg-slate-100 text-slate-600',
+  };
+
+  return (
+    <div className="rounded-[24px] border border-slate-100 bg-slate-50/70 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
+          <p className="mt-2 text-[1.75rem] font-semibold tracking-tight text-slate-950">{value}</p>
+          <p className="mt-1 text-sm leading-6 text-slate-500">{sub}</p>
+        </div>
+        <div className={`flex h-10 w-10 items-center justify-center rounded-[18px] ${tones[tone] || tones.sky}`}>
+          <IconComponent size={16} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PatientCard({
+  patient,
+  isActive,
+  isSelected,
+  hospitals,
+  loadingAssign,
+  loadingDispatch,
+  onAssign,
+  onDispatch,
+  onMapAssign,
+}) {
+  const severity = SEVERITY_CONFIG[patient.severity] || SEVERITY_CONFIG.medium;
+  const status = STATUS_CONFIG[patient.status] || STATUS_CONFIG.unassigned;
+  const handshake = patient._handshake_status ? HANDSHAKE_CONFIG[patient._handshake_status] : null;
+
+  return (
+    <div className={`rounded-[24px] border px-4 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)] transition ${
+      isSelected ? 'border-sky-200 bg-sky-50/40' : 'border-slate-100 bg-white'
+    }`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`h-2.5 w-2.5 rounded-full ${severity.dot}`} />
+        <p className="font-mono text-base font-semibold text-slate-950">{patient.tag_number}</p>
+        <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${severity.badge}`}>
+          {severity.label}
+        </span>
+        <span className={`ml-auto text-xs font-medium ${status.text}`}>{status.label}</span>
+      </div>
+
+      {patient.condition_notes ? (
+        <p className="mt-3 text-sm leading-6 text-slate-500">{patient.condition_notes}</p>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-500">
+        {patient.hospitals?.name ? <span className="font-medium text-slate-700">{patient.hospitals.name}</span> : <span>No hospital assigned yet</span>}
+        {handshake ? <span className={handshake.text}>{handshake.label}</span> : null}
+        {patient._transfer_code ? <span className="font-mono text-slate-600">{patient._transfer_code}</span> : null}
+      </div>
+
+      {patient._hold_remaining_sec > 0 ? (
+        <p className="mt-2 text-xs font-medium text-sky-700">
+          Hold time left: {Math.floor(patient._hold_remaining_sec / 60)}:{String(patient._hold_remaining_sec % 60).padStart(2, '0')}
+        </p>
+      ) : null}
+
+      {patient._declined_reason ? (
+        <p className="mt-2 text-xs text-slate-400">{patient._declined_reason}</p>
+      ) : null}
+
+      {patient.status === 'assigned' && isActive ? (
+        <button
+          type="button"
+          onClick={() => onDispatch(patient.id)}
+          disabled={loadingDispatch}
+          className="mt-4 inline-flex min-h-[40px] w-full items-center justify-center gap-2 rounded-full bg-slate-950 px-4 text-sm font-medium text-white transition hover:bg-slate-800"
+        >
+          {loadingDispatch ? <Loader2 size={14} className="animate-spin" /> : <Ambulance size={14} />}
+          Dispatch ambulance
+        </button>
+      ) : null}
+
+      {patient.status === 'en_route' ? (
+        <div className="mt-4 rounded-[18px] border border-sky-100 bg-sky-50 px-4 py-3">
+          <p className="text-sm font-medium text-sky-800">
+            Ambulance in transit{patient.eta_minutes ? ` · about ${patient.eta_minutes} min` : ''}
+          </p>
+        </div>
+      ) : null}
+
+      {patient.status === 'unassigned' && isActive && hospitals.length > 0 ? (
+        <QuickAssignDropdown
+          hospitals={hospitals}
+          loading={loadingAssign}
+          onAssign={(hospitalId) => onAssign(patient.id, hospitalId)}
+          onMapAssign={onMapAssign}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function QuickAssignDropdown({ hospitals, loading, onAssign, onMapAssign }) {
   const [open, setOpen] = useState(false);
-
-  // Sort hospitals by total available beds (most beds first)
-  const sorted = [...hospitals].sort((a, b) => {
-    const aTotal = (a.icu_available || 0) + (a.ward_available || 0) + (a.emergency_available || 0) + (a.surgical_available || 0);
-    const bTotal = (b.icu_available || 0) + (b.ward_available || 0) + (b.emergency_available || 0) + (b.surgical_available || 0);
-    return bTotal - aTotal;
-  });
+  const sorted = [...hospitals].sort((a, b) => totalBedsFromResponse(b) - totalBedsFromResponse(a));
 
   if (!open) {
     return (
-      <div className="flex gap-1.5 mt-1.5">
+      <div className="mt-4 flex gap-2">
         <button
-          onClick={(e) => { e.stopPropagation(); setOpen(true); }}
-          className="flex-1 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 text-[10px] font-medium py-1.5 rounded-lg transition-all flex items-center justify-center gap-1"
+          type="button"
+          onClick={() => setOpen(true)}
+          className="inline-flex min-h-[38px] flex-1 items-center justify-center gap-2 rounded-full bg-slate-950 px-3 text-xs font-medium text-white transition hover:bg-slate-800"
         >
-          <Zap size={10} /> Assign
+          <Zap size={12} />
+          Assign
         </button>
         <button
-          onClick={(e) => { e.stopPropagation(); onMapAssign(); }}
-          className="bg-gray-700/50 hover:bg-gray-700 text-gray-400 text-[10px] font-medium px-2.5 py-1.5 rounded-lg transition-all"
+          type="button"
+          onClick={onMapAssign}
+          className="inline-flex min-h-[38px] items-center justify-center rounded-full border border-slate-200 px-3 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
         >
           Map
         </button>
@@ -669,43 +682,127 @@ function QuickAssignDropdown({ hospitals, loading, onAssign, onMapAssign }) {
   }
 
   return (
-    <div className="mt-1.5 bg-[#0d1320] border border-gray-700/50 rounded-lg overflow-hidden" onClick={e => e.stopPropagation()}>
-      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-gray-800/50">
-        <p className="text-gray-400 text-[9px]">Select hospital:</p>
-        <button onClick={() => setOpen(false)} className="text-gray-600 hover:text-white">
-          <X size={10} />
+    <div className="mt-4 overflow-hidden rounded-[20px] border border-slate-200 bg-slate-50">
+      <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
+        <p className="text-xs font-medium text-slate-500">Choose a hospital</p>
+        <button type="button" onClick={() => setOpen(false)} className="text-slate-400 transition hover:text-slate-700">
+          <X size={12} />
         </button>
       </div>
-      <div className="max-h-36 overflow-y-auto">
-        {sorted.map(r => {
-          const h = r.hospital || {};
-          const totalBeds = (r.icu_available || 0) + (r.ward_available || 0) + (r.emergency_available || 0) + (r.surgical_available || 0);
-          const bedTypes = [];
-          if (r.icu_available > 0) bedTypes.push(`ICU:${r.icu_available}`);
-          if (r.emergency_available > 0) bedTypes.push(`ER:${r.emergency_available}`);
-          if (r.ward_available > 0) bedTypes.push(`Ward:${r.ward_available}`);
-          if (r.surgical_available > 0) bedTypes.push(`Surg:${r.surgical_available}`);
-
+      <div className="max-h-44 overflow-y-auto">
+        {sorted.map((response) => {
+          const hospital = response.hospital || {};
+          const totalBeds = totalBedsFromResponse(response);
           return (
             <button
-              key={r.id}
-              onClick={() => { onAssign(h.id); setOpen(false); }}
+              key={response.id}
+              type="button"
+              onClick={() => {
+                onAssign(hospital.id);
+                setOpen(false);
+              }}
               disabled={loading}
-              className="w-full text-left px-2.5 py-2 hover:bg-gray-800/50 transition-colors border-b border-gray-800/30 last:border-0 flex items-center justify-between gap-2"
+              className="w-full border-b border-slate-200 px-3 py-3 text-left transition hover:bg-white last:border-0"
             >
-              <div className="flex-1 min-w-0">
-                <p className="text-white text-[10px] font-medium truncate">{h.name || 'Unknown'}</p>
-                <p className="text-gray-500 text-[9px]">{bedTypes.join(' · ') || 'No beds'}</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate text-sm font-medium text-slate-950">{hospital.name || 'Unknown hospital'}</p>
+                <span className="text-xs font-medium text-slate-500">{response._distance ? `${response._distance}km` : `${totalBeds} beds`}</span>
               </div>
-              <div className="flex items-center gap-1.5 flex-shrink-0">
-                {r._distance && <span className="text-gray-600 text-[9px]">{r._distance}km</span>}
-                <span className={`text-[10px] font-bold ${totalBeds > 5 ? 'text-emerald-400' : totalBeds > 0 ? 'text-amber-400' : 'text-red-400'}`}>
-                  {totalBeds}
-                </span>
-              </div>
+              <p className="mt-1 text-xs text-slate-500">{bedSummary(response).join(' · ') || 'No beds reported'}</p>
             </button>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function CapacityMiniCard({ label, value }) {
+  return (
+    <div className="rounded-[18px] border border-slate-100 bg-slate-50/80 px-3 py-3 text-center">
+      <p className={`text-lg font-semibold ${value > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>{value}</p>
+      <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">{label}</p>
+    </div>
+  );
+}
+
+function ResponseCard({ response }) {
+  const hospital = response.hospitals || {};
+  const declined = response.status === 'declined';
+  const beds = bedSummary(response);
+
+  return (
+    <div className={`rounded-[24px] border px-4 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)] ${
+      declined ? 'border-slate-100 bg-slate-50/70' : 'border-slate-100 bg-white'
+    }`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-950">{hospital.name || 'Unknown hospital'}</p>
+          <p className="mt-1 text-xs text-slate-500">{response._distance ? `${response._distance}km away` : 'Distance unavailable'}</p>
+        </div>
+        <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${declined ? 'bg-slate-200 text-slate-600' : 'bg-emerald-50 text-emerald-700'}`}>
+          {declined ? 'Unable to help' : 'Responded'}
+        </span>
+      </div>
+
+      <p className="mt-3 text-sm leading-6 text-slate-500">
+        {declined ? 'This hospital could not take more patients right now.' : (beds.join(' · ') || 'No available beds reported')}
+      </p>
+    </div>
+  );
+}
+
+function AutoDistributeModal({ preview, loading, onClose, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div className="relative w-full max-w-xl overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-slate-100 px-5 py-4">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Preview</p>
+          <h3 className="mt-1 text-lg font-semibold text-slate-950">Auto-assign patients</h3>
+          <p className="mt-1 text-sm text-slate-500">
+            {preview.assigned_count} of {preview.assignments?.length} patients can be assigned.
+          </p>
+        </div>
+
+        <div className="max-h-[50vh] space-y-3 overflow-y-auto p-5">
+          {preview.assignments?.map((assignment, index) => {
+            const severity = SEVERITY_CONFIG[assignment.severity] || SEVERITY_CONFIG.medium;
+            return (
+              <div key={index} className="flex items-center justify-between rounded-[20px] border border-slate-100 bg-slate-50 px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <span className={`h-2.5 w-2.5 rounded-full ${severity.dot}`} />
+                  <span className="font-mono text-sm font-semibold text-slate-950">{assignment.tag_number}</span>
+                  <span className={`rounded-full border px-2 py-1 text-[10px] font-medium ${severity.badge}`}>
+                    {severity.label}
+                  </span>
+                </div>
+                <p className={`text-sm font-medium ${assignment.hospital_id ? 'text-sky-700' : 'text-red-600'}`}>
+                  {assignment.hospital_id ? assignment.hospital_name : 'No match found'}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex gap-2 border-t border-slate-100 px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex min-h-[42px] flex-1 items-center justify-center rounded-full border border-slate-200 px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={loading}
+            className="inline-flex min-h-[42px] flex-1 items-center justify-center gap-2 rounded-full bg-slate-950 px-4 text-sm font-medium text-white transition hover:bg-slate-800"
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+            Confirm ({preview.assigned_count})
+          </button>
+        </div>
       </div>
     </div>
   );

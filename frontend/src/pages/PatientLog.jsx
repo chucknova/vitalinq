@@ -1,40 +1,35 @@
-/**
- * PatientLog — read-only view of incoming/active/recent handshakes for a hospital.
- *
- * Route: /log/:slug
- * No auth. Auto-refreshes every 10 seconds.
- * Designed for shift handovers and bed planning on cheap Android browsers.
- */
-
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Clock, CheckCircle2, XCircle, AlertCircle, Timer, ArrowLeft, RefreshCw } from 'lucide-react';
+import {
+  Clock, CheckCircle2, XCircle, AlertCircle, Timer, ArrowLeft,
+  RefreshCw, ClipboardList, CircleDot, ChevronRight, Building2, Activity
+} from 'lucide-react';
 import api from '../lib/api';
 
 const STATUS_CONFIG = {
   requested: {
     label: 'Incoming',
-    color: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+    className: 'bg-amber-50 text-amber-600 border-amber-100',
     icon: AlertCircle,
   },
   accepted: {
     label: 'Held',
-    color: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
+    className: 'bg-sky-50 text-sky-700 border-sky-100',
     icon: Timer,
   },
   completed: {
     label: 'Admitted',
-    color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+    className: 'bg-emerald-50 text-emerald-700 border-emerald-100',
     icon: CheckCircle2,
   },
   expired: {
     label: 'Expired',
-    color: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
+    className: 'bg-slate-100 text-slate-600 border-slate-200',
     icon: Clock,
   },
   declined: {
     label: 'Declined',
-    color: 'bg-red-500/20 text-red-400 border-red-500/30',
+    className: 'bg-red-50 text-red-600 border-red-100',
     icon: XCircle,
   },
 };
@@ -61,63 +56,59 @@ export default function PatientLog() {
   const intervalRef = useRef(null);
   const countdownRef = useRef(null);
 
-  // Fetch data
-  async function fetchLog() {
+  const fetchLog = useCallback(async () => {
     try {
       const res = await api.get(`/api/hospitals/log/${slug}`);
       setData(res.data);
       setError(null);
       setLastRefresh(new Date());
     } catch (err) {
-      if (err.response?.status === 404) {
-        setError('Hospital not found. Check the URL.');
-      } else {
-        setError('Failed to load data.');
-      }
+      if (err.response?.status === 404) setError('Hospital not found. Check the URL.');
+      else setError('Failed to load data.');
     } finally {
       setLoading(false);
     }
-  }
+  }, [slug]);
 
-  // Initial fetch + auto-refresh every 10 seconds
   useEffect(() => {
     fetchLog();
     intervalRef.current = setInterval(fetchLog, 10000);
     return () => clearInterval(intervalRef.current);
-  }, [slug]);
+  }, [fetchLog]);
 
-  // Local countdown ticker for held entries
   useEffect(() => {
     countdownRef.current = setInterval(() => {
-      setData(prev => {
+      setData((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
-          entries: prev.entries.map(e => {
-            if (e.status === 'accepted' && e.time_remaining_sec > 0) {
-              return { ...e, time_remaining_sec: e.time_remaining_sec - 1 };
+          entries: prev.entries.map((entry) => {
+            if (entry.status === 'accepted' && entry.time_remaining_sec > 0) {
+              return { ...entry, time_remaining_sec: entry.time_remaining_sec - 1 };
             }
-            return e;
+            return entry;
           }),
         };
       });
     }, 1000);
+
     return () => clearInterval(countdownRef.current);
   }, []);
 
-  // Current time display
   const [now, setNow] = useState(new Date());
   useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
   }, []);
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-[#eef2f7]">
         <div className="text-center">
-          <div className="w-10 h-10 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-gray-400 text-sm">Loading patient log...</p>
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-white shadow-sm">
+            <RefreshCw size={18} className="animate-spin text-slate-700" />
+          </div>
+          <p className="text-sm text-slate-500">Loading patient log...</p>
         </div>
       </div>
     );
@@ -125,12 +116,12 @@ export default function PatientLog() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-[#0a0f1a] flex items-center justify-center p-6">
-        <div className="text-center">
-          <XCircle size={40} className="text-red-400 mx-auto mb-3" />
-          <p className="text-white text-lg font-medium mb-1">Error</p>
-          <p className="text-gray-400 text-sm">{error}</p>
-          <Link to="/" className="text-cyan-400 text-sm mt-4 inline-block hover:underline">
+      <div className="flex min-h-screen items-center justify-center bg-[#eef2f7] p-6">
+        <div className="rounded-[28px] border border-slate-200 bg-white px-8 py-10 text-center shadow-sm">
+          <XCircle size={40} className="mx-auto mb-3 text-red-500" />
+          <p className="mb-1 text-lg font-medium text-slate-900">Something went wrong</p>
+          <p className="text-sm text-slate-500">{error}</p>
+          <Link to="/" className="mt-4 inline-block text-sm font-medium text-sky-600 hover:underline">
             Go to Pulse Map
           </Link>
         </div>
@@ -141,126 +132,218 @@ export default function PatientLog() {
   const { hospital, summary, entries } = data;
 
   return (
-    <div className="min-h-screen bg-[#0a0f1a]">
-      {/* Header */}
-      <div className="border-b border-gray-800/50 px-4 py-3 sticky top-0 bg-[#0a0f1a]/95 backdrop-blur-sm z-10">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link to="/" className="text-gray-500 hover:text-white transition-colors">
-              <ArrowLeft size={18} />
-            </Link>
-            <div>
-              <h1 className="text-white text-sm font-semibold">{hospital.name}</h1>
-              <p className="text-gray-500 text-[10px]">Patient Log</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <Link
-              to={`/hospital/${slug}/dashboard`}
-              className="text-gray-500 hover:text-cyan-400 text-xs transition-colors"
-            >
-              Manage Beds →
-            </Link>
-            <div className="text-right">
-              <p className="text-white text-sm font-mono">
-                {now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
-              </p>
-              <p className="text-gray-600 text-[10px] flex items-center gap-1 justify-end">
-                <RefreshCw size={8} className="animate-spin" style={{ animationDuration: '10s' }} />
-                Auto-refreshing
-              </p>
+    <div className="min-h-screen bg-[#eef2f7] px-4 py-6 text-slate-900">
+      <div className="mx-auto max-w-[1240px]">
+        <div className="rounded-[36px] border border-black/5 bg-[#141414] p-4 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
+          <div className="rounded-[30px] bg-[#f7f8fb] p-3 sm:p-4">
+            <TopBar hospital={hospital} slug={slug} now={now} />
+
+            <div className="mt-4 space-y-4">
+              <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Patient log</p>
+                    <h1 className="mt-2 text-[1.7rem] font-semibold tracking-tight text-slate-950">Recent patient activity</h1>
+                    <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                      A simple handover view for recent requests, held beds, admissions, and declined cases.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <HeaderInfoCard
+                      icon={Building2}
+                      label="Hospital"
+                      value={hospital.name}
+                      sub="Live activity feed"
+                    />
+                    <HeaderInfoCard
+                      icon={Activity}
+                      label="Refresh"
+                      value={lastRefresh ? formatTime(lastRefresh.toISOString()) : '—'}
+                      sub="Updates every 10 seconds"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-3 lg:grid-cols-3">
+                  <SummaryCard label="Active holds" value={summary.active_holds} sub="Patients with a reserved bed" tone="sky" />
+                  <SummaryCard label="Admitted (24h)" value={summary.admitted_today} sub="Completed arrivals today" tone="emerald" />
+                  <SummaryCard label="Declined (24h)" value={summary.declined} sub="Requests turned away" tone="red" />
+                </div>
+              </section>
+
+              <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                <div className="flex flex-col gap-4 border-b border-slate-100 pb-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="text-base font-semibold text-slate-950">Recent entries</p>
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600">
+                        {entries.length}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-slate-500">Last 24 hours of patient activity.</p>
+                  </div>
+
+                  <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-2 text-xs font-medium text-slate-500">
+                    <RefreshCw size={12} className="animate-spin" style={{ animationDuration: '10s' }} />
+                    Live updates
+                  </div>
+                </div>
+
+                {entries.length === 0 ? (
+                  <div className="py-16 text-center text-sm text-slate-500">No patient activity in the last 24 hours.</div>
+                ) : (
+                  <div className="mt-5 space-y-3">
+                    {entries.map((entry) => (
+                      <LogEntryCard key={entry.transfer_code} entry={entry} />
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <div className="flex justify-between px-1 text-xs text-slate-500">
+                <p>Last refreshed: {lastRefresh ? formatTime(lastRefresh.toISOString()) : '—'}</p>
+                <Link to={`/hospital/${slug}/dashboard`} className="inline-flex items-center gap-1 font-medium text-sky-600 hover:underline">
+                  Manage beds
+                  <ChevronRight size={12} />
+                </Link>
+              </div>
             </div>
           </div>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {/* Summary stats */}
-      <div className="max-w-3xl mx-auto px-4 py-4">
-        <div className="grid grid-cols-3 gap-3 mb-4">
-          <div className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-3 text-center">
-            <p className="text-cyan-400 text-2xl font-bold">{summary.active_holds}</p>
-            <p className="text-gray-500 text-[10px] mt-0.5">Active holds</p>
-          </div>
-          <div className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-3 text-center">
-            <p className="text-emerald-400 text-2xl font-bold">{summary.admitted_today}</p>
-            <p className="text-gray-500 text-[10px] mt-0.5">Admitted (24h)</p>
-          </div>
-          <div className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-3 text-center">
-            <p className="text-red-400 text-2xl font-bold">{summary.declined}</p>
-            <p className="text-gray-500 text-[10px] mt-0.5">Declined (24h)</p>
-          </div>
+function TopBar({ hospital, slug, now }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-wrap items-center gap-3">
+        <Link to="/" className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
+          <ArrowLeft size={16} />
+        </Link>
+        <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
+          <CircleDot size={12} className="text-sky-400" />
+          Patient Log
+        </div>
+        <div className="hidden items-center gap-2 rounded-full bg-white/[0.04] px-4 py-2 text-sm text-slate-300 md:flex">
+          <ClipboardList size={13} />
+          History
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Link
+          to={`/hospital/${slug}/dashboard`}
+          className="inline-flex min-h-[40px] items-center gap-2 rounded-full bg-white px-4 text-sm font-medium text-slate-900 transition hover:bg-slate-100"
+        >
+          Open Dashboard
+        </Link>
+        <div className="text-right text-xs text-slate-400">
+          <p className="font-medium text-slate-300">{hospital.name}</p>
+          <p className="mt-0.5 font-mono">
+            {now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HeaderInfoCard({ icon, label, value, sub }) {
+  const IconComponent = icon;
+
+  return (
+    <div className="min-w-[180px] rounded-[22px] border border-slate-100 bg-slate-50/80 px-4 py-3">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-slate-700 shadow-sm">
+          <IconComponent size={16} />
+        </div>
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
+          <p className="mt-1 truncate text-sm font-semibold text-slate-950">{value}</p>
+          <p className="mt-1 text-xs text-slate-500">{sub}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({ label, value, sub, tone }) {
+  const tones = {
+    sky: 'bg-sky-50 text-sky-600',
+    emerald: 'bg-emerald-50 text-emerald-600',
+    red: 'bg-red-50 text-red-600',
+  };
+
+  return (
+    <div className="rounded-[24px] border border-slate-100 bg-slate-50/70 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</p>
+          <p className="mt-2 text-[1.75rem] font-semibold tracking-tight text-slate-950">{value}</p>
+          <p className="mt-1 text-sm leading-6 text-slate-500">{sub}</p>
+        </div>
+        <div className={`flex h-10 w-10 items-center justify-center rounded-[18px] ${tones[tone] || tones.sky}`}>
+          <ClipboardList size={16} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LogEntryCard({ entry }) {
+  const config = STATUS_CONFIG[entry.status] || STATUS_CONFIG.expired;
+  const Icon = config.icon;
+
+  let timestamp = entry.created_at;
+  if (entry.status === 'completed') timestamp = entry.completed_at;
+  else if (entry.status === 'accepted') timestamp = entry.accepted_at;
+
+  return (
+    <div className="rounded-[24px] border border-slate-100 bg-white px-5 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)]">
+      <div className="flex items-start gap-4">
+        <div className={`flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-[18px] border ${config.className}`}>
+          <Icon size={18} />
         </div>
 
-        {/* Entries */}
-        {entries.length === 0 ? (
-          <div className="text-center py-12">
-            <Clock size={32} className="text-gray-700 mx-auto mb-3" />
-            <p className="text-gray-500 text-sm">No patient activity in the last 24 hours</p>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-mono text-base font-semibold text-slate-950">{entry.transfer_code}</p>
+                <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${config.className}`}>
+                  {config.label}
+                </span>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-500">
+                <span className="font-medium text-slate-700">{(entry.bed_type || '').toUpperCase()} bed</span>
+                <span>{formatTime(timestamp)}</span>
+                <span className="text-slate-400">Transfer request</span>
+              </div>
+              <p className="mt-3 text-sm leading-6 text-slate-500">
+                {entry.status === 'completed'
+                  ? 'Patient arrived and the handover was completed.'
+                  : entry.status === 'accepted'
+                    ? 'Bed is currently being held for this patient.'
+                    : entry.status === 'declined'
+                      ? 'This request was declined and is no longer active.'
+                      : entry.status === 'requested'
+                        ? 'Waiting for a hospital decision.'
+                        : 'This request is no longer active.'}
+              </p>
+            </div>
+
+            {entry.status === 'accepted' && entry.time_remaining_sec > 0 ? (
+              <div className="rounded-[18px] bg-slate-50 px-3 py-3 text-right lg:min-w-[108px]">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Time left</p>
+                <p className="mt-1 font-mono text-lg font-semibold text-sky-700">
+                  {formatCountdown(entry.time_remaining_sec)}
+                </p>
+              </div>
+            ) : null}
           </div>
-        ) : (
-          <div className="space-y-2">
-            {entries.map((entry) => {
-              const config = STATUS_CONFIG[entry.status] || STATUS_CONFIG.expired;
-              const Icon = config.icon;
-
-              // Determine the relevant timestamp
-              let timestamp = entry.created_at;
-              if (entry.status === 'completed') timestamp = entry.completed_at;
-              else if (entry.status === 'accepted') timestamp = entry.accepted_at;
-
-              return (
-                <div
-                  key={entry.transfer_code}
-                  className="bg-[#151d2e] border border-gray-800/50 rounded-xl p-3.5 flex items-center gap-3"
-                >
-                  {/* Status icon */}
-                  <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 border ${config.color}`}>
-                    <Icon size={16} />
-                  </div>
-
-                  {/* Info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <span className="text-white text-sm font-mono font-bold">{entry.transfer_code}</span>
-                      <span className="text-gray-600 text-[10px]">{entry.bed_type.toUpperCase()}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${config.color}`}>
-                        {config.label}
-                      </span>
-                      <span className="text-gray-600 text-[10px]">
-                        {formatTime(timestamp)}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Countdown for held entries */}
-                  {entry.status === 'accepted' && entry.time_remaining_sec > 0 && (
-                    <div className="text-right flex-shrink-0">
-                      <p className="text-cyan-300 text-lg font-mono font-bold">
-                        {formatCountdown(entry.time_remaining_sec)}
-                      </p>
-                      <p className="text-gray-600 text-[9px]">remaining</p>
-                    </div>
-                  )}
-
-                  {entry.status === 'accepted' && entry.time_remaining_sec <= 0 && (
-                    <div className="text-right flex-shrink-0">
-                      <p className="text-red-400 text-xs font-medium">Expiring...</p>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Footer */}
-        <div className="text-center py-6">
-          <p className="text-gray-700 text-[10px]">
-            Last refreshed: {lastRefresh ? formatTime(lastRefresh.toISOString()) : '—'}
-            {' · '}{entries.length} entries shown (last 24h)
-          </p>
         </div>
       </div>
     </div>

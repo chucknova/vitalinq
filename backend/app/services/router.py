@@ -44,6 +44,7 @@ from app.services.hospital_flows import (
     handle_discharge,
     send_bed_type_list,
 )
+from app.services.transport_reroute import reroute_transport_request
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +631,54 @@ async def handle_button(phone: str, payload: str):
                 }).eq("id", broadcast_id).execute()
         await send_text(phone, "Understood. Thank you for responding. Stay safe.")
 
+    elif payload.startswith("transport_hospital_accept_"):
+        transport_id = payload.replace("transport_hospital_accept_", "")
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"http://localhost:8000/api/transport/{transport_id}/hospital-respond",
+                    json={"accepted": True},
+                    timeout=10,
+                )
+            await send_text(phone, "✅ Thank you. Please send your ambulance to the patient's location.")
+        except Exception as e:
+            print(f"   ❌ Transport hospital accept failed: {e}")
+            await send_text(phone, "Something went wrong. Please try again.")
+
+    elif payload.startswith("transport_hospital_decline_"):
+        transport_id = payload.replace("transport_hospital_decline_", "")
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"http://localhost:8000/api/transport/{transport_id}/hospital-respond",
+                    json={"accepted": False},
+                    timeout=10,
+                )
+            await send_text(phone, "Understood. We'll check private ambulance services.")
+        except Exception as e:
+            print(f"   ❌ Transport hospital decline failed: {e}")
+
+    elif payload.startswith("transport_dispatch_accept_"):
+        # Format: transport_dispatch_accept_{transport_id}_{company_id}
+        parts = payload.replace("transport_dispatch_accept_", "").rsplit("_", 1)
+        if len(parts) == 2:
+            transport_id, company_id = parts
+            # The dispatch company needs to pick an ambulance — set session
+            set_session(phone, flow="transport_dispatch", step="select_ambulance", data={
+                "transport_id": transport_id,
+                "company_id": company_id,
+            })
+            await send_text(phone, (
+                "✅ Thank you for accepting!\n\n"
+                "Please reply with the *Vehicle ID* of the ambulance you're sending.\n"
+                "e.g. AMB-001"
+            ))
+
+    elif payload.startswith("transport_dispatch_decline_"):
+        await send_text(phone, "Understood. Thank you for responding.")
+
     else:
         print(f"   → Unknown button: {payload}")
 
@@ -813,6 +862,56 @@ async def handle_session_input(
         elif step == "confirm_override":
             # Hospital typed instead of tapping confirm/cancel
             await send_text(phone, "Please reply with a number to confirm or cancel the override.")
+
+    elif flow == "transport_dispatch":
+        if step == "select_ambulance":
+            # Dispatch company typed a vehicle ID
+            transport_id = session["data"].get("transport_id")
+            company_id = session["data"].get("company_id")
+            vehicle_id = body.strip().upper()
+            clear_session(phone)
+
+            # Find the ambulance by vehicle_id in this company
+            ambs = (
+                supabase.table("ambulances")
+                .select("id, vehicle_id, status, crew_phone")
+                .eq("company_id", company_id)
+                .execute()
+            ).data or []
+
+            ambulance = next((a for a in ambs if a["vehicle_id"].upper() == vehicle_id), None)
+
+            if not ambulance:
+                available = [a["vehicle_id"] for a in ambs if a["status"] == "available"]
+                await send_text(phone, (
+                    f"❌ Ambulance *{vehicle_id}* not found.\n\n"
+                    f"Available ambulances: {', '.join(available) if available else 'None'}"
+                ))
+                return
+
+            if ambulance["status"] != "available":
+                await send_text(phone, f"❌ Ambulance *{vehicle_id}* is currently *{ambulance['status']}*. Please pick an available one.")
+                return
+
+            # Call the dispatch-respond endpoint
+            try:
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"http://localhost:8000/api/transport/{transport_id}/dispatch-respond",
+                        json={
+                            "company_id": company_id,
+                            "ambulance_id": ambulance["id"],
+                        },
+                        timeout=10,
+                    )
+                if resp.status_code == 200:
+                    await send_text(phone, f"✅ *{vehicle_id}* has been dispatched. The crew has been notified.")
+                else:
+                    await send_text(phone, f"❌ Failed to dispatch: {resp.json().get('detail', 'Unknown error')}")
+            except Exception as e:
+                print(f"   ❌ Transport dispatch failed: {e}")
+                await send_text(phone, "Something went wrong. Please try again.")
 
     elif flow == "broadcast_report":
         if step == "awaiting_capacity":
@@ -1184,13 +1283,36 @@ async def execute_override(phone: str, handshake_id: str, walkin_urgency: str):
     comparison = result.get("_urgency_comparison", "higher")
     flag = " ⚠️ (flagged: walk-in was equal or lower priority)" if comparison != "higher" else ""
 
-    # Notify hospital
+    has_active_ambulance = False
+    reroute_result = None
+    transport_req = (
+        supabase.table("transport_requests")
+        .select("id, assignment_id, status")
+        .eq("handshake_id", handshake_id)
+        .execute()
+    ).data
+    if transport_req:
+        tr = transport_req[0]
+        if tr.get("assignment_id") and tr["status"] in ("dispatch_accepted", "rerouted"):
+            has_active_ambulance = True
+            try:
+                reroute_result = await reroute_transport_request(tr["id"])
+            except Exception as e:
+                print(f"   ⚠️ Ambulance reroute failed from WhatsApp override: {e}")
+                has_active_ambulance = False
+
+    if has_active_ambulance and reroute_result:
+        await send_text(phone, (
+            f"✅ Override executed for *{result.get('transfer_code', '')}*.{flag}\n\n"
+            f"The patient's ambulance has been rerouted to *{reroute_result.get('new_hospital', {}).get('name', 'another hospital')}*."
+        ))
+        return
+
     await send_text(phone, (
         f"✅ Override executed for *{result.get('transfer_code', '')}*.{flag}\n\n"
         f"The held patient is being automatically rerouted to alternative hospitals."
     ))
 
-    # Auto-reroute the displaced patient
     reroute_count = await reroute_displaced_patient(result, hospital_name)
 
     if reroute_count > 0:

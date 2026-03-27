@@ -1,13 +1,4 @@
-/**
- * HospitalCard — rich detail popup when clicking a hospital marker.
- *
- * Dark theme to match the map. Clear visual hierarchy:
- *   1. Hospital name + type badge
- *   2. Trust + freshness at a glance
- *   3. Bed availability bars (visual, not just numbers)
- *   4. Equipment as compact tags
- *   5. Action hint
- */
+import { BedDouble, CheckCircle2, Clock3, ShieldCheck, Stethoscope, X } from 'lucide-react';
 
 const BED_LABELS = {
   icu: 'ICU',
@@ -20,18 +11,18 @@ const BED_LABELS = {
 };
 
 const TYPE_LABELS = {
-  teaching: { label: 'Teaching Hospital', color: 'bg-purple-500/20 text-purple-300 border-purple-500/30' },
-  general: { label: 'General Hospital', color: 'bg-blue-500/20 text-blue-300 border-blue-500/30' },
-  specialist: { label: 'Specialist', color: 'bg-amber-500/20 text-amber-300 border-amber-500/30' },
-  private: { label: 'Private', color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' },
-  maternity: { label: 'Maternity Centre', color: 'bg-pink-500/20 text-pink-300 border-pink-500/30' },
-  clinic: { label: 'Clinic', color: 'bg-gray-500/20 text-gray-300 border-gray-500/30' },
+  teaching: { label: 'Teaching Hospital', color: 'bg-white/[0.05] text-slate-200 border-white/[0.08]' },
+  general: { label: 'General Hospital', color: 'bg-white/[0.05] text-slate-200 border-white/[0.08]' },
+  specialist: { label: 'Specialist', color: 'bg-white/[0.05] text-slate-200 border-white/[0.08]' },
+  private: { label: 'Private', color: 'bg-white/[0.05] text-slate-200 border-white/[0.08]' },
+  maternity: { label: 'Maternity Centre', color: 'bg-white/[0.05] text-slate-200 border-white/[0.08]' },
+  clinic: { label: 'Clinic', color: 'bg-white/[0.05] text-slate-200 border-white/[0.08]' },
 };
 
 const TRUST_CONFIG = {
-  verified: { label: 'Verified', icon: '✓', bg: 'bg-emerald-500/15', text: 'text-emerald-400', border: 'border-emerald-500/30' },
-  active: { label: 'Active', icon: '●', bg: 'bg-gray-500/15', text: 'text-gray-400', border: 'border-gray-500/30' },
-  unverified: { label: 'Unverified', icon: '!', bg: 'bg-amber-500/15', text: 'text-amber-400', border: 'border-amber-500/30' },
+  verified: { label: 'Confirmed', bg: 'bg-emerald-500/12', text: 'text-emerald-300', border: 'border-emerald-500/20' },
+  active: { label: 'Active', bg: 'bg-white/[0.04]', text: 'text-slate-300', border: 'border-white/[0.08]' },
+  unverified: { label: 'Needs review', bg: 'bg-amber-500/12', text: 'text-amber-300', border: 'border-amber-500/20' },
 };
 
 function formatTime(isoString) {
@@ -44,7 +35,7 @@ function formatTime(isoString) {
 }
 
 function getFreshnessColor(isoString) {
-  if (!isoString) return 'text-gray-600';
+  if (!isoString) return 'text-slate-500';
   const hours = (new Date() - new Date(isoString)) / (1000 * 60 * 60);
   if (hours < 2) return 'text-emerald-400';
   if (hours < 6) return 'text-amber-400';
@@ -58,100 +49,107 @@ export default function HospitalCard({ hospital, onClose }) {
   const typeInfo = TYPE_LABELS[hospital.hospital_type] || TYPE_LABELS.general;
   const accuracy = Math.round((hospital.accuracy_score || 0.5) * 100);
 
-  // Calculate total availability
   let totalAvail = 0;
   let totalBeds = 0;
-  beds.forEach((b) => {
-    totalAvail += b.available_count || 0;
-    totalBeds += b.total_count || 0;
+  beds.forEach((bed) => {
+    totalAvail += bed.available_count || 0;
+    totalBeds += bed.total_count || 0;
   });
 
   return (
-    <div className="w-[310px] bg-[#0d1320] rounded-xl overflow-hidden border border-gray-700/50 shadow-2xl shadow-black/60 relative">
+    <div className="relative max-h-[calc(100vh-80px)] w-[348px] overflow-y-auto rounded-2xl border border-white/[0.08] bg-[#0f1827] shadow-2xl shadow-black/60">
+      <div className="h-1 w-full bg-sky-400/70" />
 
-      {/* ── Header ────────────────────────────────────── */}
-      <div className="p-4 pb-3">
-        {/* Close button */}
+      <div className="p-5 pb-4">
         {onClose && (
           <button
             onClick={onClose}
-            className="absolute top-3 right-3 text-gray-600 hover:text-gray-300 transition-colors z-10"
+            className="absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.04] text-slate-500 transition-colors hover:bg-white/[0.08] hover:text-white"
+            aria-label="Close hospital details"
           >
-            <span className="text-lg leading-none">×</span>
+            <X size={15} />
           </button>
         )}
-        <div className="flex items-start justify-between gap-2 mb-2">
-          <div className="flex-1 min-w-0 pr-4">
-            <h3 className="text-white font-semibold text-sm leading-tight truncate">
+
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1 pr-4">
+            <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Hospital</p>
+            <h3 className="truncate text-base font-semibold leading-tight text-white">
               {hospital.name}
             </h3>
-            <div className="flex items-center gap-2 mt-1.5">
-              <span className={`text-[10px] px-1.5 py-0.5 rounded border ${typeInfo.color}`}>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className={`rounded-md border px-2 py-1 text-[11px] ${typeInfo.color}`}>
                 {typeInfo.label}
               </span>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded border flex items-center gap-1 ${trust.bg} ${trust.text} ${trust.border}`}>
-                <span className="text-[8px]">{trust.icon}</span>
+              <span className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] ${trust.bg} ${trust.text} ${trust.border}`}>
+                <ShieldCheck size={11} />
                 {trust.label}
               </span>
             </div>
           </div>
 
-          {/* Availability score circle */}
-          <div className="flex-shrink-0 w-11 h-11 rounded-full border-2 flex items-center justify-center"
-            style={{
-              borderColor: totalAvail > 10 ? '#10b981' : totalAvail > 0 ? '#f59e0b' : '#ef4444',
-            }}
-          >
-            <div className="text-center leading-none">
-              <span className="text-white text-sm font-bold block">{totalAvail}</span>
-              <span className="text-gray-500 text-[7px] block">beds</span>
+          <div className="flex h-[72px] w-[86px] flex-shrink-0 flex-col items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03]">
+            <div className="flex items-center gap-1 text-slate-400">
+              <BedDouble size={12} />
+              <span className="text-[10px] uppercase tracking-[0.12em]">Open</span>
+            </div>
+            <div className="mt-1 text-center leading-none">
+              <span className="block text-2xl font-semibold text-white">{totalAvail}</span>
+              <span className="block text-[10px] text-slate-500">of {totalBeds || 0}</span>
             </div>
           </div>
         </div>
 
-        {/* Freshness + accuracy row */}
-        <div className="flex items-center gap-3 text-[10px]">
-          <span className={`flex items-center gap-1 ${getFreshnessColor(hospital.last_report_at)}`}>
-            <span className="w-1.5 h-1.5 rounded-full bg-current" />
-            Updated {formatTime(hospital.last_report_at)}
-          </span>
-          <span className="text-gray-600">·</span>
-          <span className="text-gray-400">
-            {accuracy}% accuracy
-          </span>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2.5">
+            <p className="text-[10px] uppercase tracking-[0.12em] text-slate-500">Updated</p>
+            <p className={`mt-1 flex items-center gap-1.5 text-xs font-medium ${getFreshnessColor(hospital.last_report_at)}`}>
+              <Clock3 size={12} />
+              {formatTime(hospital.last_report_at)}
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2.5">
+            <p className="text-[10px] uppercase tracking-[0.12em] text-slate-500">Match score</p>
+            <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-sky-300">
+              <CheckCircle2 size={12} />
+              {accuracy}% reliable
+            </p>
+          </div>
         </div>
       </div>
 
-      {/* ── Bed breakdown ─────────────────────────────── */}
-      <div className="px-4 pb-3">
-        <div className="space-y-2">
+      <div className="border-t border-white/[0.08] px-5 py-4">
+        <div className="mb-3 flex items-center gap-2">
+          <Stethoscope size={13} className="text-sky-300" />
+          <h4 className="text-sm font-medium text-white">Bed breakdown</h4>
+        </div>
+        <div className="space-y-2.5">
           {beds.map((bed) => {
             const label = BED_LABELS[bed.bed_type] || bed.bed_type;
             const avail = bed.available_count || 0;
             const overflow = bed.overflow_count || 0;
             const total = bed.total_count || 1;
             const pct = Math.min(100, ((avail + overflow) / total) * 100);
-            const barColor = avail > 0 ? 'bg-emerald-500' : overflow > 0 ? 'bg-amber-500' : 'bg-red-500';
+            const barColor = avail > 0 ? '#10b981' : overflow > 0 ? '#f59e0b' : '#ef4444';
 
             return (
-              <div key={bed.bed_type}>
-                <div className="flex items-center justify-between mb-0.5">
-                  <span className="text-gray-400 text-[11px]">{label}</span>
-                  <span className="text-[11px]">
+              <div key={bed.bed_type} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
+                <div className="mb-1.5 flex items-center justify-between gap-3">
+                  <span className="text-sm text-slate-200">{label}</span>
+                  <span className="text-xs">
                     {avail > 0 ? (
-                      <span className="text-emerald-400 font-medium">{avail} available</span>
+                      <span className="font-medium text-emerald-300">{avail} open</span>
                     ) : overflow > 0 ? (
-                      <span className="text-amber-400 font-medium">{overflow} overflow</span>
+                      <span className="font-medium text-amber-300">{overflow} overflow</span>
                     ) : (
-                      <span className="text-red-400">Full</span>
+                      <span className="text-red-300">Full</span>
                     )}
                   </span>
                 </div>
-                {/* Progress bar */}
-                <div className="w-full h-1 bg-gray-800 rounded-full overflow-hidden">
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
                   <div
-                    className={`h-full rounded-full ${barColor} transition-all duration-500`}
-                    style={{ width: `${pct}%` }}
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{ width: `${pct}%`, backgroundColor: barColor }}
                   />
                 </div>
               </div>
@@ -160,20 +158,23 @@ export default function HospitalCard({ hospital, onClose }) {
         </div>
       </div>
 
-      {/* ── Equipment ─────────────────────────────────── */}
       {equipment.length > 0 && (
-        <div className="px-4 pb-3">
-          <div className="flex flex-wrap gap-1">
+        <div className="border-t border-white/[0.08] px-5 py-4">
+          <div className="mb-3 flex items-center gap-2">
+            <ShieldCheck size={13} className="text-sky-300" />
+            <h4 className="text-sm font-medium text-white">Equipment</h4>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
             {equipment.slice(0, 8).map((eq) => (
               <span
                 key={eq}
-                className="bg-gray-800/80 text-gray-400 px-1.5 py-0.5 rounded text-[9px] border border-gray-700/50"
+                className="rounded-md border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-[11px] text-slate-300"
               >
                 {eq.replace('_', ' ')}
               </span>
             ))}
             {equipment.length > 8 && (
-              <span className="text-gray-600 text-[9px] px-1.5 py-0.5">
+              <span className="px-2 py-1 text-[11px] text-slate-500">
                 +{equipment.length - 8}
               </span>
             )}
@@ -181,10 +182,9 @@ export default function HospitalCard({ hospital, onClose }) {
         </div>
       )}
 
-      {/* ── Footer action hint ────────────────────────── */}
-      <div className="px-4 py-2.5 bg-cyan-500/5 border-t border-gray-800/50">
-        <p className="text-cyan-400/80 text-[10px] text-center">
-          Use the search panel to reserve a bed at this hospital
+      <div className="border-t border-white/[0.08] bg-white/[0.03] px-5 py-3">
+        <p className="text-center text-[11px] text-slate-400">
+          Use the search panel to reserve care here.
         </p>
       </div>
     </div>
