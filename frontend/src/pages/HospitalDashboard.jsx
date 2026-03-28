@@ -140,6 +140,10 @@ export default function HospitalDashboard() {
     return () => clearInterval(intervalRef.current);
   }, [fetchDashboard]);
 
+  function refreshDashboardSoon() {
+    fetchDashboard().catch(() => undefined);
+  }
+
   async function handleIncrement(bedType) {
     setActionLoading((prev) => ({ ...prev, [bedType]: 'inc' }));
     try {
@@ -228,7 +232,7 @@ export default function HospitalDashboard() {
         beds,
         reported_by: 'Dashboard — Still Accurate',
       });
-      await fetchDashboard();
+      refreshDashboardSoon();
     } catch (err) {
       console.error('Still accurate failed:', err);
     } finally {
@@ -249,7 +253,11 @@ export default function HospitalDashboard() {
         beds,
         reported_by: 'Dashboard — All Full',
       });
-      await fetchDashboard();
+      setData((prev) => ({
+        ...prev,
+        beds: prev.beds.map((bed) => ({ ...bed, available_count: 0, overflow_count: 0 })),
+      }));
+      refreshDashboardSoon();
     } catch (err) {
       console.error('All full failed:', err);
     } finally {
@@ -261,7 +269,13 @@ export default function HospitalDashboard() {
     setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'accept' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/accept/${handshakeId}`);
-      await fetchDashboard();
+      setData((prev) => ({
+        ...prev,
+        active_handshakes: prev.active_handshakes.map((hs) =>
+          hs.id === handshakeId ? { ...hs, status: 'accepted' } : hs
+        ),
+      }));
+      refreshDashboardSoon();
     } catch (err) {
       console.error('Accept failed:', err);
     } finally {
@@ -273,7 +287,11 @@ export default function HospitalDashboard() {
     setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'decline' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/decline/${handshakeId}`, { reason });
-      await fetchDashboard();
+      setData((prev) => ({
+        ...prev,
+        active_handshakes: prev.active_handshakes.filter((hs) => hs.id !== handshakeId),
+      }));
+      refreshDashboardSoon();
     } catch (err) {
       console.error('Decline failed:', err);
     } finally {
@@ -287,7 +305,11 @@ export default function HospitalDashboard() {
       await api.post(`/api/hospitals/dashboard/${slug}/override/${handshakeId}`, {
         walkin_urgency: walkinUrgency,
       });
-      await fetchDashboard();
+      setData((prev) => ({
+        ...prev,
+        active_handshakes: prev.active_handshakes.filter((hs) => hs.id !== handshakeId),
+      }));
+      refreshDashboardSoon();
     } catch (err) {
       console.error('Override failed:', err);
     } finally {
@@ -299,7 +321,11 @@ export default function HospitalDashboard() {
     setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'complete' }));
     try {
       await api.post(`/api/hospitals/dashboard/${slug}/complete/${handshakeId}`);
-      await fetchDashboard();
+      setData((prev) => ({
+        ...prev,
+        active_handshakes: prev.active_handshakes.filter((hs) => hs.id !== handshakeId),
+      }));
+      refreshDashboardSoon();
     } catch (err) {
       console.error('Complete failed:', err);
     } finally {
@@ -311,7 +337,8 @@ export default function HospitalDashboard() {
     setActionLoading((prev) => ({ ...prev, [`tr_${transportId}`]: 'accept' }));
     try {
       await api.post(`/api/transport/${transportId}/hospital-respond`, { accepted: true });
-      await fetchDashboard();
+      setTransportRequests((prev) => prev.filter((transport) => transport.id !== transportId));
+      refreshDashboardSoon();
     } catch (err) {
       console.error('Transport accept failed:', err);
     } finally {
@@ -323,7 +350,8 @@ export default function HospitalDashboard() {
     setActionLoading((prev) => ({ ...prev, [`tr_${transportId}`]: 'decline' }));
     try {
       await api.post(`/api/transport/${transportId}/hospital-respond`, { accepted: false });
-      await fetchDashboard();
+      setTransportRequests((prev) => prev.filter((transport) => transport.id !== transportId));
+      refreshDashboardSoon();
     } catch (err) {
       console.error('Transport decline failed:', err);
     } finally {

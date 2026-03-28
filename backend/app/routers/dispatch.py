@@ -13,13 +13,20 @@ GET    /api/dispatch/assignments/{id}/track             — patient-facing: get 
 """
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 from app.database import supabase
 from app.services.whatsapp import send_text
 
 router = APIRouter(prefix="/dispatch", tags=["Dispatch"])
+
+
+async def _send_text_background(phone: str, message: str):
+    try:
+        await send_text(phone, message)
+    except Exception as exc:
+        print(f"   ⚠️ Background send_text failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +69,24 @@ def get_company_by_slug(slug: str) -> dict:
     if not result.data:
         raise HTTPException(status_code=404, detail="Dispatch company not found")
     return result.data[0]
+
+
+def _rows_by_id(rows: list[dict]) -> dict[str, dict]:
+    return {row["id"]: row for row in rows if row.get("id")}
+
+
+def _group_updates_by_assignment(rows: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        assignment_id = row.get("assignment_id")
+        if not assignment_id:
+            continue
+        grouped.setdefault(assignment_id, []).append({
+            "status": row.get("status"),
+            "note": row.get("note"),
+            "created_at": row.get("created_at"),
+        })
+    return grouped
 
 
 VALID_AMBULANCE_STATUSES = {"available", "dispatched", "en_route_to_patient", "at_scene", "en_route_to_hospital", "offline", "maintenance"}
@@ -107,32 +132,64 @@ async def get_company_dashboard(slug: str):
             .execute()
         ).data or []
 
-        # Enrich with hospital names and patient info
-        for a in all_assignments:
-            if a.get("destination_hospital_id"):
-                h = supabase.table("hospitals").select("id, name, slug, address").eq("id", a["destination_hospital_id"]).execute()
-                a["_hospital"] = h.data[0] if h.data else None
-            if a.get("broadcast_patient_id"):
-                p = supabase.table("broadcast_patients").select("tag_number, severity, condition_notes").eq("id", a["broadcast_patient_id"]).execute()
-                a["_patient"] = p.data[0] if p.data else None
-            # Get ambulance info
-            amb = next((x for x in ambulances if x["id"] == a["ambulance_id"]), None)
-            a["_ambulance"] = {"vehicle_id": amb["vehicle_id"], "plate_number": amb["plate_number"]} if amb else None
-            # Get transfer code from handshake
-            if a.get("handshake_id"):
-                hs = supabase.table("handshakes").select("transfer_code").eq("id", a["handshake_id"]).execute()
-                a["_transfer_code"] = hs.data[0].get("transfer_code") if hs.data else None
-            else:
-                a["_transfer_code"] = None
-            # Get status timeline
+        hospital_ids = list({a["destination_hospital_id"] for a in all_assignments if a.get("destination_hospital_id")})
+        patient_ids = list({a["broadcast_patient_id"] for a in all_assignments if a.get("broadcast_patient_id")})
+        handshake_ids = list({a["handshake_id"] for a in all_assignments if a.get("handshake_id")})
+        assignment_ids = [a["id"] for a in all_assignments if a.get("id")]
+
+        hospital_map = {}
+        if hospital_ids:
+            hospitals = (
+                supabase.table("hospitals")
+                .select("id, name, slug, address")
+                .in_("id", hospital_ids)
+                .execute()
+            ).data or []
+            hospital_map = _rows_by_id(hospitals)
+
+        patient_map = {}
+        if patient_ids:
+            patients = (
+                supabase.table("broadcast_patients")
+                .select("id, tag_number, severity, condition_notes")
+                .in_("id", patient_ids)
+                .execute()
+            ).data or []
+            patient_map = _rows_by_id(patients)
+
+        handshake_map = {}
+        if handshake_ids:
+            handshakes = (
+                supabase.table("handshakes")
+                .select("id, transfer_code")
+                .in_("id", handshake_ids)
+                .execute()
+            ).data or []
+            handshake_map = _rows_by_id(handshakes)
+
+        timeline_map = {}
+        if assignment_ids:
             updates = (
                 supabase.table("ambulance_status_updates")
-                .select("status, note, created_at")
-                .eq("assignment_id", a["id"])
+                .select("assignment_id, status, note, created_at")
+                .in_("assignment_id", assignment_ids)
                 .order("created_at")
                 .execute()
             ).data or []
-            a["_timeline"] = updates
+            timeline_map = _group_updates_by_assignment(updates)
+
+        ambulance_map = _rows_by_id(ambulances)
+
+        for a in all_assignments:
+            a["_hospital"] = hospital_map.get(a.get("destination_hospital_id"))
+            a["_patient"] = patient_map.get(a.get("broadcast_patient_id"))
+
+            amb = ambulance_map.get(a.get("ambulance_id"))
+            a["_ambulance"] = {"vehicle_id": amb["vehicle_id"], "plate_number": amb["plate_number"]} if amb else None
+
+            handshake = handshake_map.get(a.get("handshake_id"))
+            a["_transfer_code"] = handshake.get("transfer_code") if handshake else None
+            a["_timeline"] = timeline_map.get(a.get("id"), [])
 
         assignments = all_assignments
 
@@ -326,7 +383,7 @@ async def get_assignment(assignment_id: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/assignments/{assignment_id}/status")
-async def update_assignment_status(assignment_id: str, request: StatusUpdate):
+async def update_assignment_status(assignment_id: str, request: StatusUpdate, background_tasks: BackgroundTasks):
     a = supabase.table("ambulance_assignments").select("*, ambulances(id, vehicle_id, crew_phone)").eq("id", assignment_id).execute()
     if not a.data:
         raise HTTPException(status_code=404, detail="Assignment not found")
@@ -386,7 +443,7 @@ async def update_assignment_status(assignment_id: str, request: StatusUpdate):
         msg = STATUS_MESSAGES[request.status]
         if vehicle:
             msg = f"{msg}\nAmbulance: *{vehicle}*"
-        await send_text(patient_phone, msg)
+        background_tasks.add_task(_send_text_background, patient_phone, msg)
 
     print(f"   🚑 STATUS UPDATE: {assignment_id[:8]} → {request.status}")
 

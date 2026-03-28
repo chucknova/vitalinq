@@ -103,7 +103,6 @@ async def accept_handshake(handshake_id: str) -> dict | None:
     - Sets expires_at (now + hold_duration)
     - Decrements available_count for that bed type at that hospital
     """
-    # Fetch the handshake
     result = (
         supabase.table("handshakes")
         .select("*")
@@ -116,7 +115,20 @@ async def accept_handshake(handshake_id: str) -> dict | None:
         print(f"⚠️ Handshake {handshake_id} not found or not in 'requested' status")
         return None
 
-    handshake = result.data[0]
+    return await accept_handshake_record(result.data[0])
+
+
+async def accept_handshake_record(handshake: dict) -> dict | None:
+    """
+    Accept a handshake when the caller already has the requested row.
+
+    This avoids an extra handshake fetch on hot paths like reroutes.
+    """
+    if not handshake or handshake.get("status") != "requested":
+        print("⚠️ Handshake not found or not in 'requested' status")
+        return None
+
+    handshake_id = handshake["id"]
     now = datetime.now(timezone.utc)
     hold_minutes = handshake.get("hold_duration_min", 45)
     expires_at = now + timedelta(minutes=hold_minutes)

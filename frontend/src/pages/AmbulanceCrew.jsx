@@ -77,6 +77,10 @@ export default function AmbulanceCrew() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
+  function refreshCrewSoon() {
+    fetchData().catch(() => undefined);
+  }
+
   async function handleStatusUpdate(newStatus) {
     if (!assignment) return;
     setUpdating(true);
@@ -84,7 +88,19 @@ export default function AmbulanceCrew() {
       await api.post(`/api/dispatch/assignments/${assignment.id}/status`, {
         status: newStatus,
       });
-      await fetchData();
+      const nowIso = new Date().toISOString();
+      setAssignment((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev, status: newStatus };
+        if (newStatus === 'at_scene') next.picked_up_at = nowIso;
+        if (newStatus === 'delivered') next.delivered_at = nowIso;
+        return next;
+      });
+      setTimeline((prev) => [
+        ...prev,
+        { status: newStatus, note: null, created_at: nowIso },
+      ]);
+      refreshCrewSoon();
     } catch (err) {
       console.error('Status update failed:', err);
     } finally {

@@ -10,7 +10,7 @@ POST /api/hospitals/dashboard/{slug}/decline/{handshake_id}   — decline with r
 """
 
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.database import supabase
@@ -20,6 +20,35 @@ from app.services.transport_reroute import reroute_transport_request
 from app.services.whatsapp import send_text, send_buttons
 
 router = APIRouter(prefix="/hospitals/dashboard", tags=["Hospital Dashboard"])
+
+
+async def _send_text_background(phone: str, message: str):
+    try:
+        await send_text(phone, message)
+    except Exception as exc:
+        print(f"   ⚠️ Background send_text failed: {exc}")
+
+
+async def _background_override_reroute(handshake_id: str, result: dict, hospital_name: str):
+    try:
+        transport_req = (
+            supabase.table("transport_requests")
+            .select("id, assignment_id, status")
+            .eq("handshake_id", handshake_id)
+            .execute()
+        ).data or []
+
+        if transport_req:
+            tr = transport_req[0]
+            if tr.get("assignment_id") and tr["status"] in ("dispatch_accepted", "rerouted"):
+                reroute_result = await reroute_transport_request(tr["id"])
+                print(f"   🔄 Ambulance rerouted: {reroute_result.get('new_hospital', {}).get('name', 'unknown')}")
+                return
+
+        from app.services.router import reroute_displaced_patient
+        await reroute_displaced_patient(result, hospital_name)
+    except Exception as exc:
+        print(f"   ⚠️ Background override reroute failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +353,7 @@ async def decrement_bed(slug: str, bed_type: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/{slug}/accept/{handshake_id}")
-async def accept_handshake_web(slug: str, handshake_id: str):
+async def accept_handshake_web(slug: str, handshake_id: str, background_tasks: BackgroundTasks):
     """Accept a handshake from the web dashboard."""
     hospital = get_hospital_by_slug(slug)
 
@@ -352,7 +381,7 @@ async def accept_handshake_web(slug: str, handshake_id: str):
     transfer_code = handshake["transfer_code"]
     bed_type = handshake["bed_type"].upper()
 
-    await send_text(requester_phone, (
+    background_tasks.add_task(_send_text_background, requester_phone, (
         f"\u2705 *Bed confirmed at {hospital['name']}!*\n\n"
         f"Bed type: {bed_type}\n"
         f"Address: {hospital['address']}\n"
@@ -382,7 +411,7 @@ DECLINE_REASONS = {
 }
 
 @router.post("/{slug}/decline/{handshake_id}")
-async def decline_handshake_web(slug: str, handshake_id: str, request: DeclineRequest):
+async def decline_handshake_web(slug: str, handshake_id: str, request: DeclineRequest, background_tasks: BackgroundTasks):
     """Decline a handshake with reason from the web dashboard."""
     hospital = get_hospital_by_slug(slug)
 
@@ -414,7 +443,7 @@ async def decline_handshake_web(slug: str, handshake_id: str, request: DeclineRe
 
     # Notify the patient
     requester_phone = handshake["requesting_party_phone"]
-    await send_text(requester_phone, (
+    background_tasks.add_task(_send_text_background, requester_phone, (
         f"\u274c *{hospital['name']}* could not hold a bed.\n"
         f"Reason: {reason_label}\n\n"
         f"Send *EMERGENCY* to search for other available hospitals."
@@ -432,7 +461,7 @@ class OverrideRequest(BaseModel):
     reason: Optional[str] = None
 
 @router.post("/{slug}/override/{handshake_id}")
-async def override_handshake_web(slug: str, handshake_id: str, request: OverrideRequest):
+async def override_handshake_web(slug: str, handshake_id: str, request: OverrideRequest, background_tasks: BackgroundTasks):
     """Override a held bed for a walk-in emergency from the web dashboard."""
     hospital = get_hospital_by_slug(slug)
 
@@ -455,37 +484,15 @@ async def override_handshake_web(slug: str, handshake_id: str, request: Override
     if not result:
         raise HTTPException(status_code=400, detail="Failed to override handshake")
 
-    reroute_result = None
-    has_active_ambulance = False
-    transport_req = (
-        supabase.table("transport_requests")
-        .select("id, assignment_id, status")
-        .eq("handshake_id", handshake_id)
-        .execute()
-    ).data
-    if transport_req:
-        tr = transport_req[0]
-        if tr.get("assignment_id") and tr["status"] in ("dispatch_accepted", "rerouted"):
-            has_active_ambulance = True
-            try:
-                reroute_result = await reroute_transport_request(tr["id"])
-                print(f"   🔄 Ambulance rerouted: {reroute_result.get('new_hospital', {}).get('name', 'unknown')}")
-            except Exception as e:
-                print(f"   ⚠️ Ambulance reroute failed: {e}")
-                has_active_ambulance = False
-
-    reroute_count = 0
-    if not has_active_ambulance:
-        from app.services.router import reroute_displaced_patient
-        reroute_count = await reroute_displaced_patient(result, hospital["name"])
+    background_tasks.add_task(_background_override_reroute, handshake_id, result, hospital["name"])
 
     return {
         "status": "overridden",
         "urgency_comparison": result.get("_urgency_comparison", "unknown"),
         "walkin_urgency": request.walkin_urgency,
         "held_urgency": result.get("_held_urgency", "medium"),
-        "reroute_results_count": reroute_count,
-        "ambulance_rerouted": reroute_result,
+        "reroute_results_count": 0,
+        "ambulance_rerouted": None,
     }
 
 
@@ -494,7 +501,7 @@ async def override_handshake_web(slug: str, handshake_id: str, request: Override
 # ---------------------------------------------------------------------------
 
 @router.post("/{slug}/complete/{handshake_id}")
-async def complete_handshake_web(slug: str, handshake_id: str):
+async def complete_handshake_web(slug: str, handshake_id: str, background_tasks: BackgroundTasks):
     """Confirm patient arrival — complete the handshake from the web dashboard."""
     hospital = get_hospital_by_slug(slug)
 
@@ -524,7 +531,7 @@ async def complete_handshake_web(slug: str, handshake_id: str):
     requester_phone = handshake["requesting_party_phone"]
     transfer_code = handshake["transfer_code"]
 
-    await send_text(requester_phone, (
+    background_tasks.add_task(_send_text_background, requester_phone, (
         f"✅ *Arrival confirmed at {hospital['name']}!*\n\n"
         f"Transfer code *{transfer_code}* has been verified.\n"
         f"Wishing a speedy recovery."
