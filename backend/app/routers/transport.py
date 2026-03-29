@@ -36,6 +36,146 @@ class DispatchResponse(BaseModel):
     ambulance_id: str
 
 
+def _format_pickup_display(transport: dict) -> str:
+    pickup_address = (transport.get("pickup_address") or "").strip()
+    generic_labels = {
+        "",
+        "location shared",
+        "shared gps location",
+        "patient live location",
+    }
+    if pickup_address.lower() not in generic_labels:
+        return pickup_address
+
+    lat = transport.get("pickup_lat")
+    lng = transport.get("pickup_lng")
+    if lat is not None and lng is not None:
+        return f"Lat {float(lat):.5f}, Lng {float(lng):.5f}"
+
+    return "Location shared"
+
+
+async def start_transport_request_flow(transport: dict, handshake: dict | None = None) -> dict:
+    """
+    Kick off the existing hospital-first transport workflow for a transport row.
+
+    This lets normal patient transport and broadcast-created transport requests
+    share the exact same downstream behavior.
+    """
+    if not transport.get("destination_hospital_id"):
+        raise HTTPException(status_code=400, detail="Transport request has no destination hospital")
+
+    hosp = (
+        supabase.table("hospitals")
+        .select("id, name, phone, whatsapp_number")
+        .eq("id", transport["destination_hospital_id"])
+        .execute()
+    )
+    if not hosp.data:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    hospital = hosp.data[0]
+
+    if handshake is None and transport.get("handshake_id"):
+        hs = supabase.table("handshakes").select("*").eq("id", transport["handshake_id"]).execute()
+        handshake = hs.data[0] if hs.data else None
+
+    severity = transport.get("severity") or "medium"
+    if handshake and isinstance(handshake.get("parsed_requirements"), dict):
+        severity = handshake["parsed_requirements"].get("urgency", severity)
+
+    _sync_broadcast_patient_transport(
+        transport_id=transport["id"],
+        handshake_id=transport.get("handshake_id"),
+        transport_status="asking_hospital",
+        patient_status="assigned",
+    )
+
+    patient_phone = transport.get("patient_phone")
+    should_notify_patient = patient_phone and patient_phone != "dispatch"
+    if should_notify_patient:
+        await send_text(patient_phone, (
+            "🚑 *Transport request received.*\n\n"
+            f"We're checking if *{hospital['name']}* can send an ambulance to pick you up.\n"
+            "Please wait — we'll update you shortly."
+        ))
+
+    wa_number = hospital.get("whatsapp_number")
+    if wa_number:
+        severity_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+        await send_buttons(wa_number, (
+            f"🚑 *Transport Request*\n\n"
+            f"A patient with a confirmed bed needs pickup.\n"
+            f"Severity: {severity_emoji} *{severity.upper()}*\n"
+            f"Pickup: {_format_pickup_display(transport)}\n"
+            f"Transfer code: *{(handshake or {}).get('transfer_code', 'N/A')}*\n\n"
+            f"Can you send an ambulance?"
+        ), [
+            ("✅ Yes, we'll send", f"transport_hospital_accept_{transport['id']}"),
+            ("❌ No ambulance available", f"transport_hospital_decline_{transport['id']}"),
+        ])
+
+    print(f"🚑 TRANSPORT REQUEST: {transport['id'][:8]} — asking {hospital['name']}")
+
+    return {
+        "transport_id": transport["id"],
+        "status": "asking_hospital",
+        "hospital": hospital["name"],
+    }
+
+
+def _find_broadcast_patient_for_transport(transport_id: str | None = None, handshake_id: str | None = None) -> dict | None:
+    if transport_id:
+        patient = (
+            supabase.table("broadcast_patients")
+            .select("id, status, transport_id, ambulance_assignment_id, assigned_ambulance_id")
+            .eq("transport_id", transport_id)
+            .execute()
+        )
+        if patient.data:
+            return patient.data[0]
+
+    if handshake_id:
+        patient = (
+            supabase.table("broadcast_patients")
+            .select("id, status, transport_id, ambulance_assignment_id, assigned_ambulance_id")
+            .eq("handshake_id", handshake_id)
+            .execute()
+        )
+        if patient.data:
+            return patient.data[0]
+
+    return None
+
+
+def _sync_broadcast_patient_transport(
+    *,
+    transport_id: str,
+    handshake_id: str | None = None,
+    transport_status: str | None = None,
+    assignment_id: str | None = None,
+    ambulance_id: str | None = None,
+    patient_status: str | None = None,
+):
+    patient = _find_broadcast_patient_for_transport(transport_id=transport_id, handshake_id=handshake_id)
+    if not patient:
+        return
+
+    update_data = {}
+    if patient.get("transport_id") != transport_id:
+        update_data["transport_id"] = transport_id
+    if transport_status is not None:
+        update_data["transport_status"] = transport_status
+    if assignment_id is not None:
+        update_data["ambulance_assignment_id"] = assignment_id
+    if ambulance_id is not None:
+        update_data["assigned_ambulance_id"] = ambulance_id
+    if patient_status is not None:
+        update_data["status"] = patient_status
+
+    if update_data:
+        supabase.table("broadcast_patients").update(update_data).eq("id", patient["id"]).execute()
+
+
 # ---------------------------------------------------------------------------
 # POST /api/transport/request — patient requests transport
 # ---------------------------------------------------------------------------
@@ -59,14 +199,6 @@ async def request_transport(request: TransportRequest):
 
     hospital_id = handshake["receiving_hospital_id"]
     patient_phone = handshake["requesting_party_phone"]
-
-    # Get hospital info
-    hosp = supabase.table("hospitals").select("id, name, phone, whatsapp_number").eq("id", hospital_id).execute()
-    if not hosp.data:
-        raise HTTPException(status_code=404, detail="Hospital not found")
-    hospital = hosp.data[0]
-
-    # Get urgency from parsed_requirements
     severity = "medium"
     pr = handshake.get("parsed_requirements")
     if pr and isinstance(pr, dict):
@@ -84,38 +216,7 @@ async def request_transport(request: TransportRequest):
         "status": "asking_hospital",
     }).execute()
 
-    transport_id = tr.data[0]["id"]
-
-    # Notify the patient
-    await send_text(patient_phone, (
-        "🚑 *Transport request received.*\n\n"
-        f"We're checking if *{hospital['name']}* can send an ambulance to pick you up.\n"
-        "Please wait — we'll update you shortly."
-    ))
-
-    # Ask the hospital
-    wa_number = hospital.get("whatsapp_number")
-    if wa_number:
-        severity_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
-        await send_buttons(wa_number, (
-            f"🚑 *Transport Request*\n\n"
-            f"A patient with a confirmed bed needs pickup.\n"
-            f"Severity: {severity_emoji} *{severity.upper()}*\n"
-            f"Pickup: {request.pickup_address or 'Location shared'}\n"
-            f"Transfer code: *{handshake.get('transfer_code', 'N/A')}*\n\n"
-            f"Can you send an ambulance?"
-        ), [
-            ("✅ Yes, we'll send", f"transport_hospital_accept_{transport_id}"),
-            ("❌ No ambulance available", f"transport_hospital_decline_{transport_id}"),
-        ])
-
-    print(f"🚑 TRANSPORT REQUEST: {transport_id[:8]} — asking {hospital['name']}")
-
-    return {
-        "transport_id": transport_id,
-        "status": "asking_hospital",
-        "hospital": hospital["name"],
-    }
+    return await start_transport_request_flow(tr.data[0], handshake)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +257,12 @@ async def _hospital_accepted(transport: dict):
         "crew_phone": hospital_phone,
         "resolved_at": now,
     }).eq("id", transport["id"]).execute()
+    _sync_broadcast_patient_transport(
+        transport_id=transport["id"],
+        handshake_id=transport.get("handshake_id"),
+        transport_status="hospital_accepted",
+        patient_status="en_route",
+    )
 
     # Notify patient — simple, just a phone number
     await send_text(transport["patient_phone"], (
@@ -177,6 +284,12 @@ async def _hospital_declined(transport: dict):
         "status": "asking_dispatch",
         "hospital_response": "declined",
     }).eq("id", transport["id"]).execute()
+    _sync_broadcast_patient_transport(
+        transport_id=transport["id"],
+        handshake_id=transport.get("handshake_id"),
+        transport_status="asking_dispatch",
+        patient_status="assigned",
+    )
 
     # Find dispatch companies (all active ones for now)
     companies = (
@@ -213,7 +326,7 @@ async def _hospital_declined(transport: dict):
         await send_buttons(phone, (
             f"🚑 *Ambulance Needed*\n\n"
             f"Severity: {severity_emoji} *{severity.upper()}*\n"
-            f"Pickup: {transport.get('pickup_address') or 'Location shared'}\n"
+            f"Pickup: {_format_pickup_display(transport)}\n"
             f"Destination: *{hospital_name}*\n\n"
             f"Can your company respond?"
         ), [
@@ -240,6 +353,12 @@ async def _no_ambulance_available(transport: dict):
         "status": "no_ambulance",
         "resolved_at": now,
     }).eq("id", transport["id"]).execute()
+    _sync_broadcast_patient_transport(
+        transport_id=transport["id"],
+        handshake_id=transport.get("handshake_id"),
+        transport_status="no_ambulance",
+        patient_status="assigned",
+    )
 
     # Get hospital for directions link
     hosp = supabase.table("hospitals").select("name, address").eq("id", transport["destination_hospital_id"]).execute()
@@ -294,12 +413,17 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
     # Get company name
     company = supabase.table("dispatch_companies").select("name").eq("id", request.company_id).execute()
     company_name = company.data[0]["name"] if company.data else "Ambulance service"
+    broadcast_patient = _find_broadcast_patient_for_transport(
+        transport_id=transport_id,
+        handshake_id=transport.get("handshake_id"),
+    )
 
     now = datetime.now(timezone.utc).isoformat()
 
     # Create ambulance assignment
     assignment = supabase.table("ambulance_assignments").insert({
         "ambulance_id": request.ambulance_id,
+        "broadcast_patient_id": broadcast_patient["id"] if broadcast_patient else None,
         "handshake_id": transport.get("handshake_id"),
         "pickup_lat": transport.get("pickup_lat"),
         "pickup_lng": transport.get("pickup_lng"),
@@ -333,6 +457,14 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
         "crew_phone": crew_phone,
         "resolved_at": now,
     }).eq("id", transport_id).execute()
+    _sync_broadcast_patient_transport(
+        transport_id=transport_id,
+        handshake_id=transport.get("handshake_id"),
+        transport_status="dispatch_accepted",
+        assignment_id=assignment_id,
+        ambulance_id=request.ambulance_id,
+        patient_status="en_route",
+    )
 
     # Get transfer code from the handshake
     transfer_code = ""
@@ -360,7 +492,7 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
 
         await send_text(crew_phone, (
             f"🚑 *New Pickup — {ambulance['vehicle_id']}*\n\n"
-            f"Pickup: {transport.get('pickup_address') or 'See dispatcher'}\n"
+            f"Pickup: {_format_pickup_display(transport)}\n"
             f"Destination: *{hospital_name}*\n"
             f"{f'Address: {hospital_address}' + chr(10) if hospital_address else ''}"
             f"Patient phone: {transport['patient_phone']}\n"
@@ -453,6 +585,9 @@ async def get_hospital_pending_transports(hospital_id: str):
         .execute()
     ).data or []
 
+    for result in results:
+        result["pickup_address"] = _format_pickup_display(result)
+
     return {"pending": results}
 
 
@@ -473,6 +608,7 @@ async def get_dispatch_pending_transports():
 
     # Enrich with hospital names
     for r in results:
+        r["pickup_address"] = _format_pickup_display(r)
         if r.get("destination_hospital_id"):
             h = supabase.table("hospitals").select("name, address").eq("id", r["destination_hospital_id"]).execute()
             r["_hospital"] = h.data[0] if h.data else None

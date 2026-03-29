@@ -214,6 +214,24 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     return { latitude, longitude };
   }
 
+  async function reverseGeocodeLocation(latitude, longitude) {
+    const fallback = `Lat ${latitude.toFixed(5)}, Lng ${longitude.toFixed(5)}`;
+    const token = import.meta.env.VITE_MAPBOX_TOKEN;
+    if (!token) return fallback;
+
+    try {
+      const res = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json` +
+        `?access_token=${token}&limit=1&country=NG`
+      );
+      const data = await res.json();
+      const placeName = data?.features?.[0]?.place_name;
+      return placeName || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   function handleTriageOutcome({ parsed_requirements: parsedRequirements, results }) {
     setTriageAnalysis(parsedRequirements);
 
@@ -399,11 +417,12 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
     try {
       const { latitude, longitude } = await getCurrentLocation(10000);
+      const pickupAddress = await reverseGeocodeLocation(latitude, longitude);
       const res = await api.post('/api/transport/request', {
         handshake_id: handshakeId,
         pickup_lat: latitude,
         pickup_lng: longitude,
-        pickup_address: 'Patient live location',
+        pickup_address: pickupAddress,
       });
       setTransportId(res.data.transport_id);
     } catch (error) {

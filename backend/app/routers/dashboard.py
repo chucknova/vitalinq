@@ -9,6 +9,7 @@ POST /api/hospitals/dashboard/{slug}/accept/{handshake_id}    — accept handsha
 POST /api/hospitals/dashboard/{slug}/decline/{handshake_id}   — decline with reason from web
 """
 
+import math
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -20,6 +21,14 @@ from app.services.transport_reroute import reroute_transport_request
 from app.services.whatsapp import send_text, send_buttons
 
 router = APIRouter(prefix="/hospitals/dashboard", tags=["Hospital Dashboard"])
+
+
+def _haversine(lat1, lng1, lat2, lng2):
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 async def _send_text_background(phone: str, message: str):
@@ -169,6 +178,100 @@ async def get_dashboard(slug: str):
     # Parse location
     lat, lng = _parse_location(hospital.get("location"))
 
+    # ── Pending broadcasts this hospital can answer from the dashboard ─────
+    pending_broadcasts = []
+    broadcast_history = []
+    if lat is not None and lng is not None:
+        active_broadcasts = (
+            supabase.table("broadcasts")
+            .select("id, title, description, lat, lng, radius_km, expected_patients, created_at, status, images")
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            .execute()
+        ).data or []
+
+        if active_broadcasts:
+            existing_responses = (
+                supabase.table("broadcast_responses")
+                .select("broadcast_id, status")
+                .eq("hospital_id", hospital_id)
+                .in_("broadcast_id", [b["id"] for b in active_broadcasts])
+                .execute()
+            ).data or []
+            responded_ids = {response["broadcast_id"] for response in existing_responses if response.get("broadcast_id")}
+
+            for broadcast in active_broadcasts:
+                if broadcast["id"] in responded_ids:
+                    continue
+                b_lat = broadcast.get("lat")
+                b_lng = broadcast.get("lng")
+                if b_lat is None or b_lng is None:
+                    continue
+                distance_km = round(_haversine(lat, lng, b_lat, b_lng), 1)
+                if distance_km > (broadcast.get("radius_km") or 0):
+                    continue
+                pending_broadcasts.append({
+                    **broadcast,
+                    "_distance_km": distance_km,
+                })
+
+    # ── Broadcast history for this hospital ────────────────────────────────
+    response_rows = (
+        supabase.table("broadcast_responses")
+        .select("broadcast_id, status, responded_at, notes, icu_available, ward_available, emergency_available, surgical_available, maternity_available, pediatric_available, broadcasts(id, title, description, created_at, status, expected_patients, images)")
+        .eq("hospital_id", hospital_id)
+        .order("responded_at", desc=True)
+        .limit(20)
+        .execute()
+    ).data or []
+
+    history_broadcast_ids = [row["broadcast_id"] for row in response_rows if row.get("broadcast_id")]
+    assigned_patients = []
+    if history_broadcast_ids:
+        assigned_patients = (
+            supabase.table("broadcast_patients")
+            .select("id, broadcast_id, status, handshake_id")
+            .eq("assigned_hospital_id", hospital_id)
+            .in_("broadcast_id", history_broadcast_ids)
+            .execute()
+        ).data or []
+
+    handshakes_by_id = {}
+    handshake_ids = [patient["handshake_id"] for patient in assigned_patients if patient.get("handshake_id")]
+    if handshake_ids:
+        handshake_rows = (
+            supabase.table("handshakes")
+            .select("id, status")
+            .in_("id", handshake_ids)
+            .execute()
+        ).data or []
+        handshakes_by_id = {row["id"]: row for row in handshake_rows}
+
+    patient_groups = {}
+    for patient in assigned_patients:
+        patient_groups.setdefault(patient["broadcast_id"], []).append(patient)
+
+    for row in response_rows:
+        broadcast = row.get("broadcasts") or {}
+        patients_for_broadcast = patient_groups.get(row["broadcast_id"], [])
+        accepted_count = 0
+        arrived_count = 0
+        for patient in patients_for_broadcast:
+            handshake = handshakes_by_id.get(patient.get("handshake_id"))
+            handshake_status = handshake.get("status") if handshake else None
+            if handshake_status in ("accepted", "completed"):
+                accepted_count += 1
+            if handshake_status == "completed" or patient.get("status") in ("admitted", "delivered"):
+                arrived_count += 1
+
+        broadcast_history.append({
+            **row,
+            "broadcast": broadcast,
+            "assigned_patients_count": len(patients_for_broadcast),
+            "accepted_patients_count": accepted_count,
+            "arrived_patients_count": arrived_count,
+        })
+
     stats = {
         "accuracy_score": hospital.get("accuracy_score", 0.5),
         "trust_tier": hospital.get("trust_tier", "active"),
@@ -206,10 +309,104 @@ async def get_dashboard(slug: str):
         },
         "beds": beds,
         "active_handshakes": active_handshakes,
+        "pending_broadcasts": pending_broadcasts,
+        "broadcast_history": broadcast_history,
         "stats": stats,
         "dashboard_url": f"/hospital/{slug}/dashboard",
         "log_url": f"/log/{slug}",
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/hospitals/dashboard/{slug}/broadcasts/{broadcast_id}/respond
+# ---------------------------------------------------------------------------
+
+@router.post("/{slug}/broadcasts/{broadcast_id}/respond")
+async def respond_to_broadcast(slug: str, broadcast_id: str, request: BroadcastResponseRequest):
+    hospital = get_hospital_by_slug(slug)
+    hospital_id = hospital["id"]
+
+    broadcast = (
+        supabase.table("broadcasts")
+        .select("id, status, lat, lng, radius_km")
+        .eq("id", broadcast_id)
+        .execute()
+    )
+    if not broadcast.data:
+        raise HTTPException(status_code=404, detail="Broadcast not found")
+
+    broadcast_row = broadcast.data[0]
+    if broadcast_row.get("status") != "active":
+        raise HTTPException(status_code=400, detail="Broadcast is no longer active")
+
+    existing = (
+        supabase.table("broadcast_responses")
+        .select("id, status")
+        .eq("broadcast_id", broadcast_id)
+        .eq("hospital_id", hospital_id)
+        .execute()
+    )
+    if existing.data:
+        return {"ok": True, "status": existing.data[0]["status"], "already_responded": True}
+
+    hospital_lat, hospital_lng = _parse_location(hospital.get("location"))
+    if hospital_lat is None or hospital_lng is None:
+        raise HTTPException(status_code=400, detail="Hospital location is missing")
+
+    distance_km = _haversine(hospital_lat, hospital_lng, broadcast_row["lat"], broadcast_row["lng"])
+    if distance_km > (broadcast_row.get("radius_km") or 0):
+        raise HTTPException(status_code=403, detail="Broadcast is outside this hospital's response area")
+
+    if request.action == "decline":
+        supabase.table("broadcast_responses").insert({
+            "broadcast_id": broadcast_id,
+            "hospital_id": hospital_id,
+            "status": "declined",
+            "notes": "Unable to help",
+        }).execute()
+    elif request.action == "respond":
+        beds = (
+            supabase.table("hospital_beds")
+            .select("bed_type, available_count")
+            .eq("hospital_id", hospital_id)
+            .execute()
+        ).data or []
+
+        capacity = {
+            "icu_available": 0,
+            "ward_available": 0,
+            "emergency_available": 0,
+            "surgical_available": 0,
+            "maternity_available": 0,
+            "pediatric_available": 0,
+        }
+        for bed in beds:
+            col = f"{bed['bed_type']}_available"
+            if col in capacity:
+                capacity[col] = bed.get("available_count", 0) or 0
+
+        supabase.table("broadcast_responses").insert({
+            "broadcast_id": broadcast_id,
+            "hospital_id": hospital_id,
+            "status": "responded",
+            **capacity,
+        }).execute()
+
+        now = datetime.now(timezone.utc).isoformat()
+        supabase.table("hospitals").update({
+            "last_report_at": now,
+            "freshness_score": 1.0,
+        }).eq("id", hospital_id).execute()
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action")
+
+    bc = supabase.table("broadcasts").select("hospitals_responded").eq("id", broadcast_id).execute()
+    if bc.data:
+        supabase.table("broadcasts").update({
+            "hospitals_responded": (bc.data[0]["hospitals_responded"] or 0) + 1,
+        }).eq("id", broadcast_id).execute()
+
+    return {"ok": True, "status": "responded" if request.action == "respond" else "declined", "already_responded": False}
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +421,10 @@ class BedUpdateItem(BaseModel):
 class BedUpdateRequest(BaseModel):
     beds: list[BedUpdateItem]
     reported_by: str = "Dashboard"
+
+
+class BroadcastResponseRequest(BaseModel):
+    action: str  # respond | decline
 
 @router.post("/{slug}/beds")
 async def update_beds_by_slug(slug: str, request: BedUpdateRequest):

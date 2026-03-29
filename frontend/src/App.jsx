@@ -3,6 +3,7 @@ import PulseMap from './components/PulseMap/PulseMap';
 import OnboardPage from './pages/OnboardPage';
 import PatientLog from './pages/PatientLog';
 import HospitalDashboard from './pages/HospitalDashboard';
+import HospitalBroadcasts from './pages/HospitalBroadcasts';
 import BroadcastNew from './pages/BroadcastNew';
 import BroadcastList from './pages/BroadcastList';
 import BroadcastDashboard from './pages/BroadcastDashboard';
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/join" element={<OnboardPage />} />
         <Route path="/log/:slug" element={<PatientLog />} />
         <Route path="/hospital/:slug/dashboard" element={<HospitalDashboard />} />
+        <Route path="/hospital/:slug/broadcasts" element={<HospitalBroadcasts />} />
         <Route path="/broadcast" element={<BroadcastList />} />
         <Route path="/broadcast/new" element={<BroadcastNew />} />
         <Route path="/broadcast/:id" element={<BroadcastDashboard />} />

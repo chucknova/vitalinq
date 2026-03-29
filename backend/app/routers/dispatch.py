@@ -93,6 +93,18 @@ VALID_AMBULANCE_STATUSES = {"available", "dispatched", "en_route_to_patient", "a
 VALID_ASSIGNMENT_STATUSES = {"assigned", "dispatched", "en_route_to_patient", "at_scene", "en_route_to_hospital", "delivered", "cancelled"}
 
 
+def _broadcast_status_from_assignment(status: str) -> str | None:
+    mapping = {
+        "assigned": "assigned",
+        "dispatched": "dispatched",
+        "en_route_to_patient": "en_route_to_patient",
+        "at_scene": "at_scene",
+        "en_route_to_hospital": "en_route_to_hospital",
+        "delivered": "delivered",
+    }
+    return mapping.get(status)
+
+
 # ---------------------------------------------------------------------------
 # GET /api/dispatch — list all companies
 # ---------------------------------------------------------------------------
@@ -421,6 +433,14 @@ async def update_assignment_status(assignment_id: str, request: StatusUpdate, ba
         "status": amb_status,
         "updated_at": now,
     }).eq("id", ambulance_id).execute()
+
+    if assignment.get("broadcast_patient_id"):
+        update_patient = {}
+        broadcast_status = _broadcast_status_from_assignment(request.status)
+        if broadcast_status:
+            update_patient["status"] = broadcast_status
+        update_patient["transport_status"] = request.status
+        supabase.table("broadcast_patients").update(update_patient).eq("id", assignment["broadcast_patient_id"]).execute()
 
     # Notify patient via WhatsApp for key milestones
     patient_phone = None

@@ -4,7 +4,7 @@ import {
   ArrowLeft, RefreshCw, Plus, Minus, Check, Loader2,
   BedDouble, AlertTriangle, X, Zap, ChevronDown, Activity,
   ClipboardList, Ambulance, Clock3, ShieldAlert, Building2,
-  Search, Filter, MapPinned, TrendingUp, CircleDot, CheckCircle2,
+  Search, Filter, TrendingUp, CircleDot, CheckCircle2, MapPinned,
   Stethoscope, ChevronRight
 } from 'lucide-react';
 import api from '../lib/api';
@@ -88,11 +88,12 @@ export default function HospitalDashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [lastRefresh, setLastRefresh] = useState(null);
   const [actionLoading, setActionLoading] = useState({});
   const [sortBy, setSortBy] = useState('time');
+  const [searchQuery, setSearchQuery] = useState('');
   const [transportRequests, setTransportRequests] = useState([]);
   const [bedDrafts, setBedDrafts] = useState({});
+  const [broadcastImages, setBroadcastImages] = useState(null);
   const intervalRef = useRef(null);
 
   const URGENCY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
@@ -106,6 +107,33 @@ export default function HospitalDashboard() {
         return new Date(b.created_at) - new Date(a.created_at);
       })
     : [];
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleHandshakes = normalizedSearch
+    ? sortedHandshakes.filter((hs) => {
+        const haystacks = [
+          hs.patient_name,
+          hs.transfer_code,
+          hs.parsed_requirements?.summary,
+          hs.parsed_requirements?.urgency,
+          hs.parsed_requirements?.bed_type,
+          hs.parsed_requirements?.notes,
+        ];
+        return haystacks.some((value) => String(value || '').toLowerCase().includes(normalizedSearch));
+      })
+    : sortedHandshakes;
+  const visibleTransportRequests = normalizedSearch
+    ? transportRequests.filter((tr) => {
+        const haystacks = [
+          tr.patient_name,
+          tr.transfer_code,
+          tr.pickup_address,
+          tr.pickup_label,
+          tr.notes,
+          tr.status,
+        ];
+        return haystacks.some((value) => String(value || '').toLowerCase().includes(normalizedSearch));
+      })
+    : transportRequests;
 
   const fetchDashboard = useCallback(async () => {
     try {
@@ -115,7 +143,6 @@ export default function HospitalDashboard() {
         Object.fromEntries((res.data?.beds || []).map((bed) => [bed.bed_type, String(bed.available_count ?? 0)]))
       );
       setError(null);
-      setLastRefresh(new Date());
 
       try {
         const hospitalId = res.data?.hospital?.id;
@@ -359,6 +386,22 @@ export default function HospitalDashboard() {
     }
   }
 
+  async function handleBroadcastResponse(broadcastId, action) {
+    setActionLoading((prev) => ({ ...prev, [`bc_${broadcastId}`]: action }));
+    try {
+      await api.post(`/api/hospitals/dashboard/${slug}/broadcasts/${broadcastId}/respond`, { action });
+      setData((prev) => ({
+        ...prev,
+        pending_broadcasts: (prev.pending_broadcasts || []).filter((broadcast) => broadcast.id !== broadcastId),
+      }));
+      refreshDashboardSoon();
+    } catch (err) {
+      console.error('Broadcast response failed:', err);
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [`bc_${broadcastId}`]: null }));
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#eef2f7]">
@@ -384,20 +427,43 @@ export default function HospitalDashboard() {
     );
   }
 
-  const { hospital, beds, active_handshakes, stats } = data;
+  const { hospital, beds, active_handshakes, pending_broadcasts = [], broadcast_history = [], stats } = data;
   const totalOpenBeds = beds.reduce((sum, bed) => sum + (bed.available_count || 0), 0);
   const totalBeds = beds.reduce((sum, bed) => sum + (bed.total_count || 0), 0);
   const heldCount = active_handshakes.filter((hs) => hs.status === 'accepted').length;
   const waitingCount = active_handshakes.filter((hs) => hs.status !== 'accepted').length;
+  const alertItems = [
+    pending_broadcasts.length > 0 ? {
+      key: 'broadcasts',
+      title: `${pending_broadcasts.length} broadcast alert${pending_broadcasts.length > 1 ? 's' : ''} waiting`,
+      detail: 'Mass-casualty alerts need a response.',
+      href: '#broadcast-alerts',
+      tone: 'amber',
+    } : null,
+    waitingCount > 0 ? {
+      key: 'requests',
+      title: `${waitingCount} incoming request${waitingCount > 1 ? 's' : ''} waiting`,
+      detail: 'Individual patient requests need a decision.',
+      href: '#incoming-patients',
+      tone: 'sky',
+    } : null,
+  ].filter(Boolean);
 
   return (
     <div className="min-h-screen bg-[#eef2f7] px-4 py-6 text-slate-900">
       <div className="mx-auto max-w-[1320px]">
         <div className="rounded-[36px] border border-black/5 bg-[#141414] p-4 shadow-[0_24px_80px_rgba(15,23,42,0.18)]">
           <div className="rounded-[30px] bg-[#f7f8fb] p-3 sm:p-4">
-            <TopBar hospital={hospital} slug={slug} lastRefresh={lastRefresh} />
+            <TopBar
+              hospital={hospital}
+              slug={slug}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+            />
 
             <div className="mt-4 space-y-4">
+              {alertItems.length > 0 ? <AlertBanner items={alertItems} /> : null}
+
               <div className="grid gap-4 xl:grid-cols-[1.45fr,1fr]">
                   <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
                     <div className="flex items-start justify-between gap-4">
@@ -408,7 +474,7 @@ export default function HospitalDashboard() {
                           Monitor bed availability, answer incoming requests, and keep ambulance pickups moving.
                         </p>
                       </div>
-                      <div className="hidden flex-col gap-2 sm:flex">
+                      <div className="hidden flex-row gap-2 sm:flex">
                         <button
                           onClick={handleStillAccurate}
                           disabled={actionLoading._global}
@@ -428,11 +494,12 @@ export default function HospitalDashboard() {
                       </div>
                     </div>
 
-                    <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-5">
                       <MetricCard icon={BedDouble} label="Open Beds" value={totalOpenBeds} sub={`of ${totalBeds || 0} total`} tone="emerald" />
                       <MetricCard icon={ClipboardList} label="Waiting" value={waitingCount} sub="Need a response" tone="amber" />
                       <MetricCard icon={CheckCircle2} label="Held Beds" value={heldCount} sub="Currently reserved" tone="sky" />
                       <MetricCard icon={Ambulance} label="Transport" value={transportRequests.length || 0} sub="Open pickups" tone="violet" />
+                      <MetricCard icon={Zap} label="Broadcasts" value={pending_broadcasts.length || 0} sub="Need a response" tone="amber" />
                     </div>
                   </section>
 
@@ -447,25 +514,30 @@ export default function HospitalDashboard() {
                       </div>
                     </div>
 
-                    <div className="mt-5 grid gap-4 md:grid-cols-3">
-                      <ProgressBand
+                    <div className="mt-5 grid gap-3 md:grid-cols-3">
+                      <SnapshotCard
+                        icon={TrendingUp}
                         label="Capacity in use"
                         value={totalBeds > 0 ? `${Math.round(((totalBeds - totalOpenBeds) / totalBeds) * 100)}%` : '0%'}
+                        sub={totalBeds > 0 ? `${totalBeds - totalOpenBeds} of ${totalBeds} beds occupied` : 'No bed data yet'}
                         percent={totalBeds > 0 ? ((totalBeds - totalOpenBeds) / totalBeds) * 100 : 0}
                         tone="emerald"
                       />
-                      <ProgressBand
+                      <SnapshotCard
+                        icon={CheckCircle2}
                         label="Accuracy score"
                         value={`${Math.round((stats.accuracy_score || 0.5) * 100)}%`}
+                        sub="How closely recent updates match expected availability"
                         percent={(stats.accuracy_score || 0.5) * 100}
                         tone="sky"
                       />
-                      <ProgressBand
+                      <SnapshotCard
+                        icon={RefreshCw}
                         label="Update freshness"
                         value={stats.hours_since_last_report != null ? `${stats.hours_since_last_report}h` : '—'}
+                        sub={getFreshnessLabel(stats.hours_since_last_report)}
                         percent={Math.max(0, 100 - ((stats.hours_since_last_report || 24) / 24) * 100)}
                         tone="amber"
-                        helper={getFreshnessLabel(stats.hours_since_last_report)}
                       />
                     </div>
                   </section>
@@ -499,7 +571,38 @@ export default function HospitalDashboard() {
                 </div>
               </section>
 
-              <section className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+              <section id="broadcast-alerts" className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
+                <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">Broadcast alerts</p>
+                    <p className="mt-1 text-xs text-slate-500">Mass-casualty broadcasts your hospital can answer from the dashboard.</p>
+                  </div>
+                  {pending_broadcasts.length > 0 ? (
+                    <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700">
+                      {pending_broadcasts.length}
+                    </span>
+                  ) : null}
+                </div>
+
+                {pending_broadcasts.length === 0 ? (
+                  <div className="py-10 text-center text-sm text-slate-500">No broadcast alerts waiting for a response.</div>
+                ) : (
+                  <div className="mt-4 space-y-3">
+                    {pending_broadcasts.map((broadcast) => (
+                      <BroadcastAlertCard
+                        key={broadcast.id}
+                        broadcast={broadcast}
+                        loading={actionLoading[`bc_${broadcast.id}`]}
+                        onRespond={() => handleBroadcastResponse(broadcast.id, 'respond')}
+                        onDecline={() => handleBroadcastResponse(broadcast.id, 'decline')}
+                        onViewImages={() => setBroadcastImages({ title: broadcast.title, images: broadcast.images || [] })}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section id="incoming-patients" className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
                 <div className="flex flex-col gap-4 border-b border-slate-100 pb-4 lg:flex-row lg:items-center lg:justify-between">
                   <div>
                     <div className="flex items-center gap-2">
@@ -537,7 +640,7 @@ export default function HospitalDashboard() {
                   <div className="py-16 text-center text-sm text-slate-500">No incoming patients right now.</div>
                 ) : (
                   <div className="mt-5 space-y-3">
-                    {sortedHandshakes.map((hs) => (
+                    {visibleHandshakes.map((hs) => (
                       <PatientRequestCard
                         key={hs.id}
                         hs={hs}
@@ -553,7 +656,7 @@ export default function HospitalDashboard() {
                 )}
               </section>
 
-              {transportRequests.length > 0 && (
+              {visibleTransportRequests.length > 0 && (
                 <aside className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
                     <div className="flex items-center justify-between">
                       <div>
@@ -561,12 +664,12 @@ export default function HospitalDashboard() {
                         <p className="mt-1 text-xs text-slate-500">Incoming ambulance pickup needs.</p>
                       </div>
                       <span className="rounded-full bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-600">
-                        {transportRequests.length}
+                        {visibleTransportRequests.length}
                       </span>
                     </div>
 
                     <div className="mt-4 space-y-3">
-                      {transportRequests.map((tr) => (
+                      {visibleTransportRequests.map((tr) => (
                         <TransportCard
                           key={tr.id}
                           tr={tr}
@@ -582,11 +685,19 @@ export default function HospitalDashboard() {
           </div>
         </div>
       </div>
+
+      {broadcastImages?.images?.length > 0 ? (
+        <ImageLightbox
+          title={broadcastImages.title}
+          images={broadcastImages.images}
+          onClose={() => setBroadcastImages(null)}
+        />
+      ) : null}
     </div>
   );
 }
 
-function TopBar({ hospital, slug, lastRefresh }) {
+function TopBar({ hospital, slug, searchQuery, onSearchChange }) {
   return (
     <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
       <div className="flex flex-wrap items-center gap-3">
@@ -597,36 +708,74 @@ function TopBar({ hospital, slug, lastRefresh }) {
           <CircleDot size={12} className="text-emerald-400" />
           Dashboard
         </div>
-        <div className="hidden items-center gap-2 rounded-full bg-white/[0.04] px-4 py-2 text-sm text-slate-300 md:flex">
-          <ClipboardList size={13} />
-          Patients
-        </div>
-        <div className="hidden items-center gap-2 rounded-full bg-white/[0.04] px-4 py-2 text-sm text-slate-300 md:flex">
-          <Ambulance size={13} />
-          Transport
+        <div className="min-w-0 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-2.5">
+          {/* <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400">Hospital</p> */}
+          <p className="truncate text-sm font-semibold text-white">{hospital.name}</p>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex min-h-[40px] items-center gap-2 rounded-full bg-white/[0.06] px-4 text-sm text-slate-300">
+      <div className="flex flex-1 flex-wrap items-center justify-end gap-3">
+        <label className="flex min-h-[42px] min-w-[220px] flex-1 items-center gap-2 rounded-full bg-white/[0.06] px-4 text-sm text-slate-300 lg:max-w-[360px] lg:flex-none">
           <Search size={14} />
-          Search
-        </div>
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search patients, codes, or transport"
+            className="w-full bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
+            aria-label="Search patients and transport requests"
+          />
+        </label>
+        <Link
+          to={`/hospital/${slug}/broadcasts`}
+          className="inline-flex min-h-[42px] items-center gap-2 rounded-full bg-white/8 px-4 text-sm font-medium text-slate-200 transition hover:bg-white/12"
+        >
+          <Zap size={14} />
+          Broadcast desk
+        </Link>
         <Link
           to={`/log/${slug}`}
-          className="inline-flex min-h-[40px] items-center gap-2 rounded-full bg-white text-sm font-medium text-slate-900 px-4 transition hover:bg-slate-100"
+          className="inline-flex min-h-[42px] items-center gap-2 rounded-full bg-white px-4 text-sm font-medium text-slate-900 transition hover:bg-slate-100"
         >
           Open Patient Log
         </Link>
-        <div className="text-right text-xs text-slate-400">
-          <p>{hospital.name}</p>
-          <p className="mt-0.5 flex items-center gap-1">
-            <RefreshCw size={10} className="animate-spin" style={{ animationDuration: '10s' }} />
-            {lastRefresh ? formatTime(lastRefresh.toISOString()) : '—'}
-          </p>
-        </div>
       </div>
     </div>
+  );
+}
+
+function AlertBanner({ items }) {
+  return (
+    <section className="rounded-[24px] border border-amber-100 bg-gradient-to-r from-amber-50 to-white p-4 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-700">
+            <AlertTriangle size={16} />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-slate-950">Attention needed</p>
+            <p className="mt-1 text-sm text-slate-600">New broadcast alerts and incoming patient requests will show up here so your team can act faster.</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {items.map((item) => (
+            <a
+              key={item.key}
+              href={item.href}
+              className={`inline-flex min-h-[40px] items-center gap-2 rounded-full px-4 text-sm font-medium transition ${
+                item.tone === 'amber'
+                  ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
+                  : 'bg-sky-100 text-sky-800 hover:bg-sky-200'
+              }`}
+            >
+              {item.tone === 'amber' ? <Zap size={14} /> : <ClipboardList size={14} />}
+              {item.title}
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -640,43 +789,177 @@ function MetricCard({ icon, label, value, sub, tone }) {
   };
 
   return (
-    <div className="rounded-2xl border border-slate-100 bg-slate-50/70 p-4">
-      <div className="flex items-start justify-between gap-3">
+    <div className="rounded-2xl border border-slate-100 bg-slate-50/70 px-3.5 py-3">
+      <div className="flex items-start justify-between gap-2.5">
         <div>
-          <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400">{label}</p>
-          <p className="mt-2 text-[1.65rem] font-semibold tracking-tight text-slate-950">{value}</p>
-          <p className="mt-1 text-sm text-slate-500">{sub}</p>
+          <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-slate-400">{label}</p>
+          <p className="mt-1.5 text-[1.38rem] font-semibold tracking-tight text-slate-950">{value}</p>
+          <p className="mt-1 text-[12px] leading-5 text-slate-500">{sub}</p>
         </div>
-        <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${tones[tone] || tones.sky}`}>
-          <CardIcon size={16} />
+        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${tones[tone] || tones.sky}`}>
+          <CardIcon size={15} />
         </div>
       </div>
     </div>
   );
 }
 
-function ProgressBand({ label, value, percent, tone, helper }) {
-  const fill = {
-    emerald: 'bg-emerald-500',
-    sky: 'bg-sky-500',
-    amber: 'bg-amber-500',
-  }[tone] || 'bg-sky-500';
+function SnapshotCard({ icon, label, value, sub, percent, tone }) {
+  const CardIcon = icon;
+  const tones = {
+    emerald: {
+      icon: 'bg-emerald-50 text-emerald-600',
+      fill: 'bg-emerald-500',
+    },
+    sky: {
+      icon: 'bg-sky-50 text-sky-600',
+      fill: 'bg-sky-500',
+    },
+    amber: {
+      icon: 'bg-amber-50 text-amber-600',
+      fill: 'bg-amber-500',
+    },
+  }[tone] || {
+    icon: 'bg-sky-50 text-sky-600',
+    fill: 'bg-sky-500',
+  };
 
   return (
-    <div>
-      <div className="mb-2 flex items-center justify-between gap-3">
+    <div className="rounded-2xl border border-slate-100 bg-slate-50/70 px-3.5 py-3">
+      <div className="flex items-start justify-between gap-2.5">
         <div>
-          <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400">{label}</p>
-          {helper ? <p className="mt-1 text-sm text-slate-500">{helper}</p> : null}
+          <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-slate-400">{label}</p>
+          <p className="mt-1.5 text-[1.38rem] font-semibold tracking-tight text-slate-950">{value}</p>
+          <p className="mt-1 text-[12px] leading-5 text-slate-500">{sub}</p>
         </div>
-        <p className="text-base font-semibold text-slate-900">{value}</p>
+        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${tones.icon}`}>
+          <CardIcon size={15} />
+        </div>
       </div>
-      <div className="h-3 overflow-hidden rounded-full bg-slate-100">
-        <div className={`h-full rounded-full ${fill}`} style={{ width: `${Math.max(4, Math.min(percent, 100))}%` }} />
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+        <div className={`h-full rounded-full ${tones.fill}`} style={{ width: `${Math.max(4, Math.min(percent, 100))}%` }} />
       </div>
     </div>
   );
 }
+
+function BroadcastAlertCard({ broadcast, loading, onRespond, onDecline, onViewImages }) {
+  return (
+    <div className="rounded-[20px] border border-slate-200 bg-slate-50/55 px-4 py-4">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-50 text-amber-600">
+              <Zap size={15} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <p className="text-[15px] font-semibold tracking-tight text-slate-950">{broadcast.title}</p>
+                <span className="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
+                  {broadcast._distance_km}km away
+                </span>
+                {broadcast.expected_patients ? (
+                  <span className="inline-flex items-center rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
+                    ~{broadcast.expected_patients} patients
+                  </span>
+                ) : null}
+                {broadcast.images?.length ? (
+                  <span className="inline-flex items-center rounded-full bg-sky-50 px-2.5 py-1 text-[11px] font-medium text-sky-700 ring-1 ring-sky-100">
+                    {broadcast.images.length} image{broadcast.images.length > 1 ? 's' : ''}
+                  </span>
+                ) : null}
+              </div>
+              <p className="mt-2 text-xs font-medium text-slate-500">Broadcast sent {formatTime(broadcast.created_at)}</p>
+              {broadcast.description ? (
+                <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-700">{broadcast.description}</p>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex shrink-0 flex-wrap items-center gap-2 xl:justify-end">
+          <button
+            type="button"
+            onClick={onRespond}
+            disabled={!!loading}
+            className="inline-flex min-h-[40px] items-center justify-center gap-2 rounded-full bg-slate-950 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+          >
+            {loading === 'respond' ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+            Respond with beds
+          </button>
+          <button
+            type="button"
+            onClick={onDecline}
+            disabled={!!loading}
+            className="inline-flex min-h-[40px] items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading === 'decline' ? <Loader2 size={14} className="animate-spin" /> : <X size={14} />}
+            Unable to help
+          </button>
+          {broadcast.images?.length ? (
+            <button
+              type="button"
+              onClick={onViewImages}
+              className="inline-flex min-h-[40px] items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+            >
+              <MapPinned size={14} />
+              View images
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImageLightbox({ title, images, onClose }) {
+  const [activeIndex, setActiveIndex] = useState(0);
+  const activeImage = images[activeIndex];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+      <div
+        className="relative w-full max-w-5xl overflow-hidden rounded-[28px] border border-white/10 bg-[#111111] shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 text-white">
+          <div>
+            <p className="text-sm font-semibold">{title}</p>
+            <p className="mt-1 text-xs text-white/60">Image {activeIndex + 1} of {images.length}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/15"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="bg-black px-4 py-4">
+          <img src={activeImage} alt="" className="max-h-[70vh] w-full rounded-[20px] object-contain" />
+        </div>
+
+        {images.length > 1 ? (
+          <div className="flex gap-2 overflow-x-auto border-t border-white/10 px-4 py-4">
+            {images.map((image, index) => (
+              <button
+                key={`${image}-${index}`}
+                type="button"
+                onClick={() => setActiveIndex(index)}
+                className={`overflow-hidden rounded-2xl border transition ${index === activeIndex ? 'border-white/60' : 'border-white/10'}`}
+              >
+                <img src={image} alt="" className="h-20 w-28 object-cover" />
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 
 function BedCard({ bed, draftValue, isLoading, onDraftChange, onCommit, onIncrement, onDecrement }) {
   const label = BED_LABELS[bed.bed_type] || bed.bed_type;

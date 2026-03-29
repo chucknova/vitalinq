@@ -135,6 +135,13 @@ async def reroute_transport_request(transport_id: str) -> dict:
         "handshake_id": new_hs["id"],
     }).eq("id", transport_id).execute()
 
+    supabase.table("broadcast_patients").update({
+        "assigned_hospital_id": new_hospital_id,
+        "handshake_id": new_hs["id"],
+        "transport_status": "rerouted",
+        "status": "en_route",
+    }).eq("transport_id", transport_id).execute()
+
     supabase.table("ambulance_status_updates").insert({
         "assignment_id": transport["assignment_id"],
         "status": "rerouted",

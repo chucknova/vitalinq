@@ -6,9 +6,9 @@ GET    /api/broadcast/{id}                         — full dashboard data
 PATCH  /api/broadcast/{id}                         — update status (resolve/cancel)
 POST   /api/broadcast/{id}/patients                — log a patient (paramedic)
 POST   /api/broadcast/patients/{id}/assign         — assign patient to hospital
+POST   /api/broadcast/patients/{id}/dispatch       — create a real transport request
 POST   /api/broadcast/{id}/auto-distribute         — auto-assign all unassigned
 PATCH  /api/broadcast/patients/{id}/position       — update ambulance GPS
-POST   /api/broadcast/patients/{id}/simulate-route — start simulated ambulance movement
 """
 
 import math
@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 from app.database import supabase
+from app.routers.transport import start_transport_request_flow
 from app.services.whatsapp import send_text, send_buttons
 from app.services.search_engine import _parse_location
 
@@ -242,6 +243,59 @@ async def get_broadcast(broadcast_id: str):
         all_hs = supabase.table("handshakes").select("id, status, transfer_code, accepted_at, completed_at, declined_reason, expires_at").in_("id", handshake_ids).execute()
         handshakes_map = {h["id"]: h for h in (all_hs.data or [])}
 
+    transport_ids = list(set(p["transport_id"] for p in patients if p.get("transport_id")))
+    transports_map = {}
+    if transport_ids:
+        all_tr = (
+            supabase.table("transport_requests")
+            .select("id, status, assignment_id, accepted_by_company_id, destination_hospital_id, crew_phone")
+            .in_("id", transport_ids)
+            .execute()
+        )
+        transports_map = {t["id"]: t for t in (all_tr.data or [])}
+
+    assignment_ids = list(set(
+        (p.get("ambulance_assignment_id") or (transports_map.get(p.get("transport_id")) or {}).get("assignment_id"))
+        for p in patients
+        if p.get("ambulance_assignment_id") or (transports_map.get(p.get("transport_id")) or {}).get("assignment_id")
+    ))
+    assignments_map = {}
+    ambulance_ids = set()
+    if assignment_ids:
+        all_assignments = (
+            supabase.table("ambulance_assignments")
+            .select("id, ambulance_id, status")
+            .in_("id", assignment_ids)
+            .execute()
+        )
+        assignments_map = {a["id"]: a for a in (all_assignments.data or [])}
+        ambulance_ids = {a["ambulance_id"] for a in assignments_map.values() if a.get("ambulance_id")}
+
+    updates_map = {}
+    if assignment_ids:
+        all_updates = (
+            supabase.table("ambulance_status_updates")
+            .select("assignment_id, status, note, created_at")
+            .in_("assignment_id", assignment_ids)
+            .order("created_at")
+            .execute()
+        ).data or []
+        for update in all_updates:
+            assignment_id = update.get("assignment_id")
+            if not assignment_id:
+                continue
+            updates_map.setdefault(assignment_id, []).append(update)
+
+    ambulances_map = {}
+    if ambulance_ids:
+        all_ambulances = (
+            supabase.table("ambulances")
+            .select("id, vehicle_id, plate_number, type")
+            .in_("id", list(ambulance_ids))
+            .execute()
+        )
+        ambulances_map = {a["id"]: a for a in (all_ambulances.data or [])}
+
     # Enrich patients
     for p in patients:
         p["hospitals"] = hospitals_map.get(p.get("assigned_hospital_id"))
@@ -261,6 +315,38 @@ async def get_broadcast(broadcast_id: str):
             p["_handshake_status"] = None
             p["_transfer_code"] = None
 
+        transport = transports_map.get(p.get("transport_id"))
+        assignment = assignments_map.get(
+            p.get("ambulance_assignment_id") or (transport or {}).get("assignment_id")
+        )
+        ambulance = ambulances_map.get(assignment.get("ambulance_id")) if assignment else None
+        updates = updates_map.get(assignment.get("id")) if assignment else []
+        latest_update = updates[-1] if updates else None
+
+        p["_transport_status"] = transport.get("status") if transport else p.get("transport_status")
+        p["_transport_contact_phone"] = transport.get("crew_phone") if transport else None
+        p["_assignment_status"] = assignment.get("status") if assignment else None
+        p["_ambulance"] = ambulance
+        p["_crew_timeline"] = updates
+        p["_crew_progress"] = latest_update.get("status") if latest_update else p.get("_assignment_status")
+        p["_crew_note"] = latest_update.get("note") if latest_update else None
+        if transport and transport.get("assignment_id") and not p.get("ambulance_assignment_id"):
+            p["ambulance_assignment_id"] = transport["assignment_id"]
+
+        if p.get("status") not in ("admitted", "deceased"):
+            effective_status = "assigned" if p.get("assigned_hospital_id") else "unassigned"
+            assignment_status = p.get("_assignment_status")
+            transport_status = p.get("_transport_status")
+
+            if assignment_status in ("assigned", "dispatched", "en_route_to_patient", "at_scene", "en_route_to_hospital", "delivered"):
+                effective_status = assignment_status
+            elif transport_status in ("asking_hospital", "asking_dispatch", "hospital_accepted", "dispatch_accepted", "no_ambulance", "rerouted", "reroute_failed"):
+                effective_status = "assigned"
+
+            p["_display_status"] = effective_status
+        else:
+            p["_display_status"] = p.get("status")
+
     # Aggregate capacity
     total_capacity = {
         "icu": 0, "ward": 0, "emergency": 0,
@@ -277,12 +363,21 @@ async def get_broadcast(broadcast_id: str):
 
     # Patient stats
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "deceased": 0}
-    status_counts = {"unassigned": 0, "assigned": 0, "en_route": 0, "arrived": 0, "admitted": 0}
+    status_counts = {
+        "unassigned": 0,
+        "assigned": 0,
+        "dispatched": 0,
+        "en_route_to_patient": 0,
+        "at_scene": 0,
+        "en_route_to_hospital": 0,
+        "delivered": 0,
+        "admitted": 0,
+    }
     for p in patients:
         sev = p.get("severity", "medium")
         if sev in severity_counts:
             severity_counts[sev] += 1
-        st = p.get("status", "unassigned")
+        st = p.get("_display_status", p.get("status", "unassigned"))
         if st in status_counts:
             status_counts[st] += 1
 
@@ -492,6 +587,107 @@ async def assign_patient(patient_id: str, request: PatientAssign):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/broadcast/patients/{id}/dispatch — create a real transport request
+# ---------------------------------------------------------------------------
+
+@router.post("/patients/{patient_id}/dispatch")
+async def dispatch_patient_transport(patient_id: str):
+    """
+    Turn an assigned broadcast patient into a real transport request.
+
+    Uses the broadcast scene as the pickup location and stores the created
+    transport request id back on the patient record.
+    """
+    pt = supabase.table("broadcast_patients").select("*").eq("id", patient_id).execute()
+    if not pt.data:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    patient = pt.data[0]
+
+    if not patient.get("assigned_hospital_id"):
+        raise HTTPException(status_code=400, detail="Patient must be assigned to a hospital first")
+    if not patient.get("handshake_id"):
+        raise HTTPException(status_code=400, detail="Patient must have a handshake before transport can be created")
+
+    if patient.get("transport_id"):
+        existing = (
+            supabase.table("transport_requests")
+            .select("id, status, destination_hospital_id")
+            .eq("id", patient["transport_id"])
+            .execute()
+        )
+        if existing.data:
+            return {
+                "patient_id": patient_id,
+                "transport_id": existing.data[0]["id"],
+                "status": existing.data[0]["status"],
+                "existing": True,
+            }
+
+    hs = (
+        supabase.table("handshakes")
+        .select("id, status, receiving_hospital_id")
+        .eq("id", patient["handshake_id"])
+        .execute()
+    )
+    if not hs.data:
+        raise HTTPException(status_code=404, detail="Handshake not found")
+
+    handshake = hs.data[0]
+    if handshake.get("status") not in ("requested", "accepted"):
+        raise HTTPException(status_code=400, detail=f"Handshake is not dispatchable (status: {handshake.get('status')})")
+    if handshake.get("receiving_hospital_id") != patient.get("assigned_hospital_id"):
+        raise HTTPException(status_code=409, detail="Assigned hospital and handshake destination do not match")
+
+    bc = (
+        supabase.table("broadcasts")
+        .select("id, title, lat, lng")
+        .eq("id", patient["broadcast_id"])
+        .execute()
+    )
+    if not bc.data:
+        raise HTTPException(status_code=404, detail="Broadcast not found")
+
+    broadcast = bc.data[0]
+
+    transport = (
+        supabase.table("transport_requests")
+        .insert({
+            "handshake_id": patient["handshake_id"],
+            "patient_phone": "dispatch",
+            "pickup_lat": broadcast.get("lat"),
+            "pickup_lng": broadcast.get("lng"),
+            "pickup_address": f"{broadcast.get('title', 'Incident scene')} scene",
+            "destination_hospital_id": patient["assigned_hospital_id"],
+            "severity": patient.get("severity", "medium"),
+            "status": "asking_hospital",
+        })
+        .execute()
+    )
+
+    transport_row = transport.data[0]
+
+    supabase.table("broadcast_patients").update({
+        "transport_id": transport_row["id"],
+        "transport_status": transport_row["status"],
+    }).eq("id", patient_id).execute()
+
+    print(f"   🚑 BROADCAST TRANSPORT CREATED: {patient.get('tag_number', patient_id[:8])} → {transport_row['id'][:8]}")
+
+    flow_result = await start_transport_request_flow(transport_row, handshake)
+    return {
+        "patient_id": patient_id,
+        "tag_number": patient.get("tag_number"),
+        "transport_id": transport_row["id"],
+        "status": flow_result["status"],
+        "hospital": flow_result.get("hospital"),
+        "pickup_address": transport_row.get("pickup_address"),
+        "destination_hospital_id": transport_row.get("destination_hospital_id"),
+        "existing": False,
+    }
+
+
+# ---------------------------------------------------------------------------
 # POST /api/broadcast/{id}/auto-distribute — assign all unassigned
 # ---------------------------------------------------------------------------
 
@@ -665,147 +861,19 @@ async def update_ambulance_position(patient_id: str, request: PositionUpdate):
     """Update ambulance GPS position for a patient in transit."""
     now = datetime.now(timezone.utc).isoformat()
 
-    pt = supabase.table("broadcast_patients").select("id, status, assigned_hospital_id").eq("id", patient_id).execute()
+    pt = supabase.table("broadcast_patients").select("id").eq("id", patient_id).execute()
     if not pt.data:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    patient = pt.data[0]
-
-    # Auto-detect arrival (within 200m of hospital)
-    arrived = False
-    if patient.get("assigned_hospital_id"):
-        hosp = supabase.table("hospitals").select("location").eq("id", patient["assigned_hospital_id"]).execute()
-        if hosp.data:
-            h_lat, h_lng = _parse_location(hosp.data[0].get("location"))
-            if h_lat:
-                dist = _haversine(request.lat, request.lng, h_lat, h_lng)
-                if dist < 0.2:  # Within 200 meters
-                    arrived = True
-
-    update_data = {
+    supabase.table("broadcast_patients").update({
         "ambulance_lat": request.lat,
         "ambulance_lng": request.lng,
         "ambulance_updated_at": now,
-    }
-
-    if arrived:
-        update_data["status"] = "arrived"
-
-    # Update status to en_route if still assigned
-    if patient["status"] == "assigned" and not arrived:
-        update_data["status"] = "en_route"
-
-    supabase.table("broadcast_patients").update(update_data).eq("id", patient_id).execute()
+    }).eq("id", patient_id).execute()
 
     return {
         "patient_id": patient_id,
         "lat": request.lat,
         "lng": request.lng,
-        "arrived": arrived,
-        "status": update_data.get("status", patient["status"]),
-    }
-
-
-# ---------------------------------------------------------------------------
-# POST /api/broadcast/patients/{id}/simulate-route — demo simulation
-# ---------------------------------------------------------------------------
-
-@router.post("/patients/{patient_id}/simulate-route")
-async def simulate_ambulance_route(patient_id: str):
-    """
-    Start a simulated ambulance route for demo purposes.
-    Generates waypoints along the driving route and stores them.
-    A background process will move the ambulance along these waypoints.
-    """
-    import os
-
-    pt = (
-        supabase.table("broadcast_patients")
-        .select("*")
-        .eq("id", patient_id)
-        .execute()
-    )
-    if not pt.data:
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    patient = pt.data[0]
-    if not patient.get("assigned_hospital_id"):
-        raise HTTPException(status_code=400, detail="Patient not assigned to a hospital yet")
-
-    # Get hospital location
-    hosp = supabase.table("hospitals").select("name, location").eq("id", patient["assigned_hospital_id"]).execute()
-    if not hosp.data:
-        raise HTTPException(status_code=404, detail="Assigned hospital not found")
-
-    h_lat, h_lng = _parse_location(hosp.data[0].get("location"))
-
-    # Get broadcast location
-    bc = supabase.table("broadcasts").select("lat, lng").eq("id", patient["broadcast_id"]).execute()
-    if not bc.data:
-        raise HTTPException(status_code=404, detail="Broadcast not found")
-    from_lat, from_lng = bc.data[0]["lat"], bc.data[0]["lng"]
-
-    if not all([h_lat, h_lng, from_lat, from_lng]):
-        raise HTTPException(status_code=400, detail="Missing location data")
-
-    # Fetch route from Mapbox — try multiple token sources
-    from app.config import settings
-    token = (
-        getattr(settings, "MAPBOX_TOKEN", "")
-        or getattr(settings, "VITE_MAPBOX_TOKEN", "")
-        or os.environ.get("MAPBOX_TOKEN", "")
-        or os.environ.get("VITE_MAPBOX_TOKEN", "")
-    )
-
-    if not token:
-        raise HTTPException(status_code=500, detail="Mapbox token not configured. Add MAPBOX_TOKEN to your .env")
-
-    import httpx
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"https://api.mapbox.com/directions/v5/mapbox/driving/"
-            f"{from_lng},{from_lat};{h_lng},{h_lat}"
-            f"?geometries=geojson&overview=full&access_token={token}",
-            timeout=15,
-        )
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail="Failed to fetch route from Mapbox")
-
-    data = resp.json()
-    if not data.get("routes"):
-        raise HTTPException(status_code=404, detail="No route found")
-
-    route = data["routes"][0]
-    coords = route["geometry"]["coordinates"]  # [[lng, lat], ...]
-    duration_sec = route["duration"]
-    distance_m = route["distance"]
-
-    # Sample ~20 waypoints evenly along the route
-    total_points = len(coords)
-    sample_count = min(20, total_points)
-    step = max(1, total_points // sample_count)
-    waypoints = [{"lat": c[1], "lng": c[0]} for c in coords[::step]]
-    # Ensure the last point is the destination
-    waypoints.append({"lat": h_lat, "lng": h_lng})
-
-    # Store waypoints in patient record for the background simulator
-    supabase.table("broadcast_patients").update({
-        "status": "en_route",
-        "eta_minutes": round(duration_sec / 60),
-        "ambulance_lat": from_lat,
-        "ambulance_lng": from_lng,
-        "ambulance_updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", patient_id).execute()
-
-    print(f"   \U0001f697 SIMULATE: {patient['tag_number']} — {len(waypoints)} waypoints, {round(duration_sec/60)} min, {round(distance_m/1000, 1)} km")
-
-    return {
-        "patient_id": patient_id,
-        "tag_number": patient["tag_number"],
-        "waypoints": waypoints,
-        "duration_minutes": round(duration_sec / 60),
-        "distance_km": round(distance_m / 1000, 1),
-        "destination": hosp.data[0]["name"],
-        "message": "Simulation ready. Call PATCH /position with each waypoint every 5 seconds.",
+        "status": "position_updated",
     }

@@ -32,8 +32,11 @@ const SEVERITY_CONFIG = {
 const STATUS_CONFIG = {
   unassigned: { label: 'Waiting', text: 'text-slate-500' },
   assigned: { label: 'Assigned', text: 'text-sky-600' },
-  en_route: { label: 'In transit', text: 'text-blue-600' },
-  arrived: { label: 'Arrived', text: 'text-emerald-600' },
+  dispatched: { label: 'Dispatched', text: 'text-sky-700' },
+  en_route_to_patient: { label: 'To patient', text: 'text-blue-600' },
+  at_scene: { label: 'At scene', text: 'text-violet-700' },
+  en_route_to_hospital: { label: 'To hospital', text: 'text-cyan-700' },
+  delivered: { label: 'Accepted', text: 'text-emerald-600' },
   admitted: { label: 'Admitted', text: 'text-emerald-700' },
 };
 
@@ -45,6 +48,49 @@ const HANDSHAKE_CONFIG = {
   expired: { label: 'Expired', text: 'text-slate-500' },
   overridden: { label: 'Overridden', text: 'text-red-600' },
 };
+
+const TRANSPORT_STATUS_CONFIG = {
+  asking_hospital: { label: 'Checking hospital transport', tone: 'bg-amber-50 text-amber-700 border-amber-100' },
+  hospital_accepted: { label: 'Hospital transport confirmed', tone: 'bg-sky-50 text-sky-700 border-sky-100' },
+  asking_dispatch: { label: 'Checking ambulance providers', tone: 'bg-amber-50 text-amber-700 border-amber-100' },
+  dispatch_accepted: { label: 'Ambulance assigned', tone: 'bg-sky-50 text-sky-700 border-sky-100' },
+  rerouted: { label: 'Rerouted to a new hospital', tone: 'bg-violet-50 text-violet-700 border-violet-100' },
+  reroute_failed: { label: 'Reroute needs attention', tone: 'bg-red-50 text-red-700 border-red-100' },
+  no_ambulance: { label: 'No ambulance available yet', tone: 'bg-red-50 text-red-700 border-red-100' },
+  dispatched: { label: 'Crew on the move', tone: 'bg-sky-50 text-sky-700 border-sky-100' },
+  en_route_to_patient: { label: 'Crew going to patient', tone: 'bg-sky-50 text-sky-700 border-sky-100' },
+  at_scene: { label: 'Crew at the scene', tone: 'bg-sky-50 text-sky-700 border-sky-100' },
+  en_route_to_hospital: { label: 'Going to the hospital', tone: 'bg-sky-50 text-sky-700 border-sky-100' },
+  delivered: { label: 'Arrived at hospital', tone: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
+};
+
+function canStartRealDispatch(patient) {
+  return getDisplayStatus(patient) === 'assigned' && !patient.transport_id && !patient._transport_status;
+}
+
+function currentTransportState(patient) {
+  return patient._crew_progress || patient._assignment_status || patient._transport_status || null;
+}
+
+function getDisplayStatus(patient) {
+  return patient._display_status || patient.status || 'unassigned';
+}
+
+function assignedWorkflowCount(byStatus = {}) {
+  return (
+    (byStatus.assigned || 0) +
+    (byStatus.dispatched || 0) +
+    (byStatus.en_route_to_patient || 0) +
+    (byStatus.at_scene || 0) +
+    (byStatus.en_route_to_hospital || 0) +
+    (byStatus.delivered || 0)
+  );
+}
+
+function isAcceptedAtHospital(patient) {
+  const displayStatus = getDisplayStatus(patient);
+  return displayStatus === 'delivered' || displayStatus === 'admitted';
+}
 
 function timeSince(iso) {
   if (!iso) return '—';
@@ -152,28 +198,22 @@ export default function BroadcastDashboard() {
   async function handleDispatch(patientId) {
     setActionLoading((prev) => ({ ...prev, [`dispatch_${patientId}`]: true }));
     try {
-      const res = await api.post(`/api/broadcast/patients/${patientId}/simulate-route`);
-      const { waypoints } = res.data;
-
-      if (waypoints && waypoints.length > 0) {
-        let idx = 0;
-        const interval = setInterval(async () => {
-          if (idx >= waypoints.length) {
-            clearInterval(interval);
-            return;
-          }
-          try {
-            await api.patch(`/api/broadcast/patients/${patientId}/position`, {
-              lat: waypoints[idx].lat,
-              lng: waypoints[idx].lng,
-            });
-          } catch {
-            // Keep the simulation lightweight if a single update fails.
-          }
-          idx += 1;
-        }, 5000);
-      }
-
+      const res = await api.post(`/api/broadcast/patients/${patientId}/dispatch`);
+      setData((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          patients: prev.patients.map((patient) => (
+            patient.id === patientId
+              ? {
+                  ...patient,
+                  transport_id: res.data.transport_id,
+                  _transport_status: res.data.status,
+                }
+              : patient
+          )),
+        };
+      });
       await fetchData();
     } catch (err) {
       console.error('Dispatch failed:', err);
@@ -213,8 +253,10 @@ export default function BroadcastDashboard() {
   const isActive = broadcast.status === 'active';
 
   const filteredPatients = patients.filter((patient) => {
-    if (patientFilter === 'unassigned') return patient.status === 'unassigned';
-    if (patientFilter === 'assigned') return patient.status !== 'unassigned';
+    const displayStatus = getDisplayStatus(patient);
+    if (patientFilter === 'unassigned') return displayStatus === 'unassigned';
+    if (patientFilter === 'assigned') return displayStatus !== 'unassigned' && !isAcceptedAtHospital(patient);
+    if (patientFilter === 'accepted') return isAcceptedAtHospital(patient);
     return true;
   });
 
@@ -269,7 +311,7 @@ export default function BroadcastDashboard() {
                   <SummaryCard label="Patients" value={patient_stats.total} sub="People logged at this incident" tone="sky" icon={Users} />
                   <SummaryCard
                     label="Assigned"
-                    value={(patient_stats.by_status.assigned || 0) + (patient_stats.by_status.en_route || 0) + (patient_stats.by_status.arrived || 0)}
+                    value={assignedWorkflowCount(patient_stats.by_status)}
                     sub="Already matched to a hospital"
                     tone="emerald"
                     icon={ClipboardList}
@@ -303,7 +345,12 @@ export default function BroadcastDashboard() {
                     </div>
                     <p className="mt-1 text-sm text-slate-500">Stacked incident feed for patient matching.</p>
                     <div className="mt-4 inline-flex rounded-full bg-slate-100 p-1">
-                      {['all', 'unassigned', 'assigned'].map((filter) => (
+                      {[
+                        ['all', 'All'],
+                        ['assigned', 'Assigned'],
+                        ['unassigned', 'Unassigned'],
+                        ['accepted', 'Accepted'],
+                      ].map(([filter, label]) => (
                         <button
                           key={filter}
                           type="button"
@@ -312,7 +359,7 @@ export default function BroadcastDashboard() {
                             patientFilter === filter ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                           }`}
                         >
-                          {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                          {label}
                         </button>
                       ))}
                     </div>
@@ -351,7 +398,7 @@ export default function BroadcastDashboard() {
                       <p className="text-base font-semibold text-slate-950">Incident map</p>
                       <p className="mt-1 text-sm text-slate-500">Patients, responding hospitals, and live ambulance movement.</p>
                     </div>
-                    {selectedPatient && selectedPatient.status === 'unassigned' ? (
+                    {selectedPatient && getDisplayStatus(selectedPatient) === 'unassigned' ? (
                       <div className="inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700">
                         <Zap size={12} />
                         Assigning {selectedPatient.tag_number}
@@ -394,7 +441,7 @@ export default function BroadcastDashboard() {
                               type="button"
                               className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-800 shadow-md transition hover:border-sky-300 hover:text-sky-700"
                               onClick={() => {
-                                if (selectedPatient?.status === 'unassigned') handleAssign(selectedPatient.id, hospital.id);
+                                if (selectedPatient && getDisplayStatus(selectedPatient) === 'unassigned') handleAssign(selectedPatient.id, hospital.id);
                               }}
                             >
                               {hospital.name?.slice(0, 12) || 'Hospital'} · {totalBeds}
@@ -403,7 +450,7 @@ export default function BroadcastDashboard() {
                         );
                       })}
 
-                      {patients.filter((patient) => patient.ambulance_lat && (patient.status === 'en_route' || patient.status === 'assigned')).map((patient) => (
+                      {patients.filter((patient) => patient.ambulance_lat && currentTransportState(patient)).map((patient) => (
                         <Marker key={`amb-${patient.id}`} latitude={patient.ambulance_lat} longitude={patient.ambulance_lng} anchor="center">
                           <div className="flex flex-col items-center">
                             <div className="mb-1 rounded-full bg-sky-600 px-2 py-1 text-[10px] font-semibold text-white shadow-lg">
@@ -424,7 +471,7 @@ export default function BroadcastDashboard() {
                       }
                     `}</style>
 
-                    {selectedPatient && selectedPatient.status === 'unassigned' ? (
+                    {selectedPatient && getDisplayStatus(selectedPatient) === 'unassigned' ? (
                       <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-full border border-sky-200 bg-white px-4 py-2 text-sm font-medium text-sky-700 shadow-lg">
                         Click a hospital marker to assign {selectedPatient.tag_number}
                       </div>
@@ -587,63 +634,82 @@ function PatientCard({
   onMapAssign,
 }) {
   const severity = SEVERITY_CONFIG[patient.severity] || SEVERITY_CONFIG.medium;
-  const status = STATUS_CONFIG[patient.status] || STATUS_CONFIG.unassigned;
+  const displayStatus = getDisplayStatus(patient);
+  const status = STATUS_CONFIG[displayStatus] || STATUS_CONFIG.unassigned;
   const handshake = patient._handshake_status ? HANDSHAKE_CONFIG[patient._handshake_status] : null;
+  const transportState = currentTransportState(patient);
+  const transport = transportState ? TRANSPORT_STATUS_CONFIG[transportState] : null;
+  const ambulanceLabel = patient._ambulance?.vehicle_id || patient._ambulance?.plate_number || null;
+  const showDispatchButton = canStartRealDispatch(patient) && isActive;
+  const isReadOnly = isAcceptedAtHospital(patient);
+  const destinationLabel = patient.hospitals?.name || 'Not assigned';
+  const transportSummary = transport ? transport.label : null;
 
   return (
-    <div className={`rounded-[24px] border px-4 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)] transition ${
-      isSelected ? 'border-sky-200 bg-sky-50/40' : 'border-slate-100 bg-white'
+    <article
+      aria-label={`Patient ${patient.tag_number}`}
+      className={`rounded-[20px] border px-3.5 py-3.5 shadow-[0_8px_24px_rgba(15,23,42,0.05)] transition ${
+      isSelected ? 'border-sky-300 bg-[linear-gradient(180deg,rgba(240,249,255,0.92),rgba(255,255,255,1))]' : 'border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,1),rgba(248,250,252,0.98))]'
     }`}>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={`h-2.5 w-2.5 rounded-full ${severity.dot}`} />
-        <p className="font-mono text-base font-semibold text-slate-950">{patient.tag_number}</p>
-        <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${severity.badge}`}>
+      <div className="flex flex-wrap items-start gap-2">
+        <span className={`mt-1 h-2.5 w-2.5 rounded-full ${severity.dot}`} />
+        <p className="font-mono text-[15px] font-semibold tracking-tight text-slate-950">{patient.tag_number}</p>
+        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold backdrop-blur ${severity.badge}`}>
           {severity.label}
         </span>
-        <span className={`ml-auto text-xs font-medium ${status.text}`}>{status.label}</span>
+        <span className={`ml-auto inline-flex rounded-full bg-slate-900/[0.03] px-2 py-0.5 text-[10px] font-semibold ${status.text}`}>{status.label}</span>
       </div>
 
       {patient.condition_notes ? (
-        <p className="mt-3 text-sm leading-6 text-slate-500">{patient.condition_notes}</p>
+        <p className="mt-2.5 text-[13px] leading-5 text-slate-700">{patient.condition_notes}</p>
       ) : null}
 
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-500">
-        {patient.hospitals?.name ? <span className="font-medium text-slate-700">{patient.hospitals.name}</span> : <span>No hospital assigned yet</span>}
-        {handshake ? <span className={handshake.text}>{handshake.label}</span> : null}
-        {patient._transfer_code ? <span className="font-mono text-slate-600">{patient._transfer_code}</span> : null}
+      <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-200/70 pt-3">
+        <MetaPill icon={<Building2 size={13} className="shrink-0 text-slate-400" />} text={destinationLabel} />
+        {handshake ? (
+          <MetaPill
+            icon={<ClipboardList size={13} className="shrink-0 text-slate-400" />}
+            text={handshake.label}
+            accentClass={handshake.text}
+            trailing={patient._transfer_code ? <span className="font-mono text-[11px] text-slate-700">{patient._transfer_code}</span> : null}
+          />
+        ) : null}
+        {transportSummary ? <MetaPill icon={<MapPin size={13} className="shrink-0 text-slate-400" />} text={transportSummary} /> : null}
+        {ambulanceLabel ? <MetaPill icon={<Ambulance size={13} className="shrink-0 text-slate-400" />} text={ambulanceLabel} /> : null}
+        {transportState === 'hospital_accepted' && patient._transport_contact_phone ? (
+          <MetaPill icon={<PhoneIcon />} text={patient._transport_contact_phone} />
+        ) : null}
       </div>
 
       {patient._hold_remaining_sec > 0 ? (
-        <p className="mt-2 text-xs font-medium text-sky-700">
+        <p className="mt-2.5 text-[11px] font-medium text-sky-700">
           Hold time left: {Math.floor(patient._hold_remaining_sec / 60)}:{String(patient._hold_remaining_sec % 60).padStart(2, '0')}
         </p>
       ) : null}
 
       {patient._declined_reason ? (
-        <p className="mt-2 text-xs text-slate-400">{patient._declined_reason}</p>
+        <p className="mt-2 text-[11px] text-slate-500">{patient._declined_reason}</p>
+      ) : null}
+      {patient._crew_note ? <p className="mt-2 text-[11px] text-slate-500">{patient._crew_note}</p> : null}
+
+      {isReadOnly ? (
+        <p className="mt-2.5 text-[11px] font-medium text-emerald-700">Read-only on broadcast board.</p>
       ) : null}
 
-      {patient.status === 'assigned' && isActive ? (
+      {showDispatchButton ? (
         <button
           type="button"
           onClick={() => onDispatch(patient.id)}
           disabled={loadingDispatch}
-          className="mt-4 inline-flex min-h-[40px] w-full items-center justify-center gap-2 rounded-full bg-slate-950 px-4 text-sm font-medium text-white transition hover:bg-slate-800"
+          aria-label={`Dispatch ambulance for ${patient.tag_number}`}
+          className="mt-3 inline-flex min-h-[40px] w-full items-center justify-center gap-2 rounded-[12px] bg-slate-950 px-4 text-sm font-medium text-white shadow-[0_10px_24px_rgba(15,23,42,0.14)] transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-300"
         >
           {loadingDispatch ? <Loader2 size={14} className="animate-spin" /> : <Ambulance size={14} />}
           Dispatch ambulance
         </button>
       ) : null}
 
-      {patient.status === 'en_route' ? (
-        <div className="mt-4 rounded-[18px] border border-sky-100 bg-sky-50 px-4 py-3">
-          <p className="text-sm font-medium text-sky-800">
-            Ambulance in transit{patient.eta_minutes ? ` · about ${patient.eta_minutes} min` : ''}
-          </p>
-        </div>
-      ) : null}
-
-      {patient.status === 'unassigned' && isActive && hospitals.length > 0 ? (
+      {displayStatus === 'unassigned' && isActive && hospitals.length > 0 ? (
         <QuickAssignDropdown
           hospitals={hospitals}
           loading={loadingAssign}
@@ -651,7 +717,34 @@ function PatientCard({
           onMapAssign={onMapAssign}
         />
       ) : null}
+    </article>
+  );
+}
+
+function MetaPill({ icon, text, trailing = null, accentClass = 'text-slate-700' }) {
+  return (
+    <div className="inline-flex min-h-[30px] items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-2.5 py-1 text-[12px] text-slate-600">
+      {icon}
+      <span className={`truncate ${accentClass}`}>{text}</span>
+      {trailing}
     </div>
+  );
+}
+
+function PhoneIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="h-[14px] w-[14px] shrink-0 text-slate-400"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.33 1.78.61 2.62a2 2 0 0 1-.45 2.11L8 9.91a16 16 0 0 0 6.09 6.09l1.46-1.27a2 2 0 0 1 2.11-.45c.84.28 1.72.49 2.62.61A2 2 0 0 1 22 16.92z" />
+    </svg>
   );
 }
 
