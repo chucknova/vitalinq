@@ -73,6 +73,29 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [transportLoading, setTransportLoading] = useState(false);
   const [transportId, setTransportId] = useState(null);
   const [transportData, setTransportData] = useState(null);
+  const [cancelLoading, setCancelLoading] = useState(false);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [holdInfo, setHoldInfo] = useState(null); // { minutes, driveEstimate, distanceKm }
+  const [holdExtended, setHoldExtended] = useState(false);
+
+  // ── Restore session from sessionStorage on mount ────────
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem('bedsignal_session');
+      if (saved) {
+        const s = JSON.parse(saved);
+        if (s.handshakeId) {
+          setHandshakeId(s.handshakeId);
+          setTransferCode(s.transferCode || null);
+          setTransportId(s.transportId || null);
+          setSelectedResult(s.selectedResult || null);
+          setPatientName(s.patientName || '');
+          setPatientPhone(s.patientPhone || '');
+          setStep(STEPS.TRACKING);
+        }
+      }
+    } catch {}
+  }, []);
 
   // Live status polling
   const { handshake, countdown } = useHandshake(handshakeId);
@@ -94,6 +117,26 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     const interval = setInterval(poll, 5000);
     return () => { active = false; clearInterval(interval); };
   }, [transportId]);
+
+  // Detect when hold is extended due to transport acceptance
+  const prevTransportStatus = useRef(null);
+  useEffect(() => {
+    if (transportData?.status && transportData.status !== prevTransportStatus.current) {
+      if (['hospital_accepted', 'dispatch_accepted'].includes(transportData.status) &&
+          !['hospital_accepted', 'dispatch_accepted'].includes(prevTransportStatus.current)) {
+        setHoldExtended(true);
+        setHoldInfo(prev => prev ? { ...prev, minutes: 60 } : { minutes: 60, driveEstimate: null, distanceKm: null });
+      }
+      prevTransportStatus.current = transportData.status;
+    }
+  }, [transportData?.status]);
+
+  // Clear persisted session when handshake reaches a terminal state
+  useEffect(() => {
+    if (handshake?.status && ['completed', 'expired'].includes(handshake.status)) {
+      try { sessionStorage.removeItem('bedsignal_session'); } catch {}
+    }
+  }, [handshake?.status]);
 
   // Auto-search for alternatives when overridden
   const prevStatus = useRef(null);
@@ -332,8 +375,14 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     setError(null);
 
     try {
-      // Get patient's current location for drive time calculation
-      let holdMin = 45; // default fallback
+      // Calculate dynamic hold time based on distance and Lagos traffic
+      // Base: 45 min (get ready, gather documents, arrange transport)
+      // + traffic-adjusted drive time (Mapbox estimate × 1.5 for Lagos traffic)
+      // Clamped between 45 and 180 minutes
+      let holdMin = 45; // base: preparation time
+      let driveEstimate = null;
+      let distanceKm = selectedResult?.distance_km || null;
+
       try {
         const pos = await new Promise((resolve, reject) =>
           navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 })
@@ -350,9 +399,15 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           );
           const routeData = await routeRes.json();
           if (routeData.routes?.[0]?.duration) {
-            const driveMin = Math.round(routeData.routes[0].duration / 60);
-            holdMin = driveMin + 15; // drive time + 15 min buffer
-            holdMin = Math.max(20, Math.min(holdMin, 180));
+            const rawDriveMin = Math.round(routeData.routes[0].duration / 60);
+            // Lagos traffic multiplier: 1.5× for realistic estimate
+            driveEstimate = Math.round(rawDriveMin * 1.5);
+            // Total: base prep time + traffic-adjusted drive
+            holdMin = 45 + driveEstimate;
+            holdMin = Math.max(45, Math.min(holdMin, 180));
+          }
+          if (routeData.routes?.[0]?.distance) {
+            distanceKm = Math.round(routeData.routes[0].distance / 1000 * 10) / 10;
           }
         }
       } catch {
@@ -371,7 +426,19 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
       setHandshakeId(res.data.handshake_id);
       setTransferCode(res.data.transfer_code);
+      setHoldInfo({ minutes: holdMin, driveEstimate, distanceKm });
       setStep(STEPS.TRACKING);
+
+      // Persist to sessionStorage so refresh doesn't lose state
+      try {
+        sessionStorage.setItem('bedsignal_session', JSON.stringify({
+          handshakeId: res.data.handshake_id,
+          transferCode: res.data.transfer_code,
+          selectedResult,
+          patientName: patientName.trim(),
+          patientPhone: patientPhone.trim(),
+        }));
+      } catch {}
     } catch (error) {
       console.error('Bed booking failed:', error);
       setError('Failed to create bed reservation. Please try again.');
@@ -393,12 +460,19 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     setPatientCondition('');
     setHandshakeId(null);
     setTransferCode(null);
+    setTransportId(null);
+    setTransportData(null);
+    setHoldInfo(null);
+    setHoldExtended(false);
     setError(null);
     setCodeCopied(false);
     setClinicResults(null);
     setRerouteResults(null);
     setRerouteLoading(false);
     onClear();
+
+    // Clear persisted session
+    try { sessionStorage.removeItem('bedsignal_session'); } catch {}
   }
 
   function copyCode() {
@@ -425,11 +499,37 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         pickup_address: pickupAddress,
       });
       setTransportId(res.data.transport_id);
+
+      // Update sessionStorage with transport ID
+      try {
+        const saved = sessionStorage.getItem('bedsignal_session');
+        if (saved) {
+          const s = JSON.parse(saved);
+          s.transportId = res.data.transport_id;
+          sessionStorage.setItem('bedsignal_session', JSON.stringify(s));
+        }
+      } catch {}
     } catch (error) {
       console.error('Transport request failed:', error);
       setError(error.response?.data?.detail || 'Failed to request transport.');
     } finally {
       setTransportLoading(false);
+    }
+  }
+
+  async function handleCancelReservation() {
+    if (!handshakeId) return;
+
+    setCancelLoading(true);
+    setShowCancelConfirm(false);
+    try {
+      await api.post(`/api/transport/cancel-reservation/${handshakeId}`);
+      handleReset();
+    } catch (error) {
+      console.error('Cancel failed:', error);
+      setError('Failed to cancel. Please try again.');
+    } finally {
+      setCancelLoading(false);
     }
   }
 
@@ -1107,15 +1207,29 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
           {/* Countdown timer for accepted */}
           {handshake?.status === 'accepted' && countdown > 0 && (
-            <div className="mb-4 flex items-center gap-4 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3.5">
-              <div className="flex-1">
-                <p className="text-[11px] font-medium uppercase tracking-wider text-amber-300">Spot held for</p>
-                <p className="mt-0.5 text-3xl font-mono font-bold tabular-nums text-amber-300">
-                  {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
-                </p>
+            <div className="mb-4 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3.5">
+              <div className="flex items-center gap-4">
+                <div className="flex-1">
+                  <p className="text-[11px] font-medium uppercase tracking-wider text-amber-300">Spot held for</p>
+                  <p className="mt-0.5 text-3xl font-mono font-bold tabular-nums text-amber-300">
+                    {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
+                  </p>
+                </div>
+                <Clock size={24} className="flex-shrink-0 text-amber-400" />
+                <p className="max-w-[80px] text-[10px] leading-snug text-amber-300">Please arrive before time runs out</p>
               </div>
-              <Clock size={24} className="flex-shrink-0 text-amber-400" />
-              <p className="max-w-[80px] text-[10px] leading-snug text-amber-300">Please arrive before time runs out</p>
+              {holdInfo && !holdExtended && (
+                <p className="mt-2 border-t border-amber-500/15 pt-2 text-[10px] text-amber-400/70">
+                  Hold estimate: {holdInfo.minutes} min
+                  {holdInfo.driveEstimate ? ` (${holdInfo.driveEstimate} min drive + 45 min prep)` : ' (base preparation time)'}
+                  {holdInfo.distanceKm ? ` · ${holdInfo.distanceKm} km away` : ''}
+                </p>
+              )}
+              {holdExtended && (
+                <p className="mt-2 border-t border-emerald-500/15 pt-2 text-[10px] text-emerald-400">
+                  🚑 Hold extended to 60 minutes — transport is on the way
+                </p>
+              )}
             </div>
           )}
 
@@ -1197,7 +1311,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                       detail={
                         hasAmbulanceReroute
                           ? `Your ambulance has been rerouted to ${transportData?._hospital?.name || 'a new hospital'}`
-                          : `Saved for about ${countdown ? Math.ceil(countdown / 60) : '—'} minutes`
+                          : `Held for ~${holdInfo?.minutes || Math.ceil((countdown || 0) / 60) || 45} min${holdInfo?.driveEstimate ? ` (${holdInfo.driveEstimate} min drive + 45 min prep)` : ''}`
                       }
                       highlight
                       icon={CheckCircle2}
@@ -1510,6 +1624,14 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   <>I need transport</>
                 )}
               </button>
+
+              <button
+                onClick={() => setShowCancelConfirm(true)}
+                disabled={cancelLoading}
+                className="mt-2 w-full text-center text-xs text-slate-500 transition-colors hover:text-red-400 disabled:text-slate-700"
+              >
+                {cancelLoading ? 'Cancelling...' : 'Cancel reservation'}
+              </button>
             </div>
           )}
 
@@ -1539,6 +1661,35 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           </p>
         )}
       </div>
+
+      {/* ── Cancel Confirmation Modal ──────────────────── */}
+      {showCancelConfirm && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center p-6">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowCancelConfirm(false)} />
+          <div className="relative w-full max-w-sm rounded-2xl border border-white/10 bg-[#0d1320] p-6 shadow-2xl">
+            <h3 className="text-white text-sm font-semibold mb-2">Cancel reservation?</h3>
+            <p className="text-slate-400 text-xs leading-relaxed mb-5">
+              This will release your bed hold{transportId ? ', stop any ambulance that was dispatched,' : ''} and notify the hospital. This action cannot be undone.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowCancelConfirm(false)}
+                className="flex-1 min-h-[40px] rounded-lg border border-white/10 bg-white/5 text-sm font-medium text-slate-300 transition-colors hover:bg-white/10"
+              >
+                Keep reservation
+              </button>
+              <button
+                onClick={handleCancelReservation}
+                disabled={cancelLoading}
+                className="flex-1 min-h-[40px] rounded-lg bg-red-500 text-sm font-medium text-white transition-colors hover:bg-red-600 disabled:bg-red-500/50 flex items-center justify-center gap-1.5"
+              >
+                {cancelLoading ? <Loader2 size={14} className="animate-spin" /> : null}
+                Yes, cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

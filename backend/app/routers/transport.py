@@ -7,11 +7,12 @@ POST   /api/transport/{id}/dispatch-respond       — dispatch company accepts
 GET    /api/transport/{id}                        — get transport request status
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 from app.database import supabase
+from app.config import settings
 from app.services.transport_reroute import reroute_transport_request
 from app.services.whatsapp import send_text, send_buttons
 
@@ -243,7 +244,16 @@ async def hospital_respond(transport_id: str, request: HospitalResponse):
 
 async def _hospital_accepted(transport: dict):
     """Hospital will send their own ambulance."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+
+    # Extend the bed hold — transport is confirmed, give 60 min from now
+    if transport.get("handshake_id"):
+        new_expiry = now + timedelta(minutes=60)
+        supabase.table("handshakes").update({
+            "expires_at": new_expiry.isoformat(),
+            "hold_duration_min": 60,
+        }).eq("id", transport["handshake_id"]).eq("status", "accepted").execute()
+        print(f"   ⏰ Hold extended to {new_expiry.strftime('%H:%M UTC')} (hospital sending transport)")
 
     # Get hospital phone
     hosp = supabase.table("hospitals").select("name, phone, whatsapp_number").eq("id", transport["destination_hospital_id"]).execute()
@@ -255,7 +265,7 @@ async def _hospital_accepted(transport: dict):
         "status": "hospital_accepted",
         "hospital_response": "accepted",
         "crew_phone": hospital_phone,
-        "resolved_at": now,
+        "resolved_at": now.isoformat(),
     }).eq("id", transport["id"]).execute()
     _sync_broadcast_patient_transport(
         transport_id=transport["id"],
@@ -418,7 +428,16 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
         handshake_id=transport.get("handshake_id"),
     )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+
+    # Extend the bed hold — ambulance is dispatched, give 60 min from now
+    if transport.get("handshake_id"):
+        new_expiry = now + timedelta(minutes=60)
+        supabase.table("handshakes").update({
+            "expires_at": new_expiry.isoformat(),
+            "hold_duration_min": 60,
+        }).eq("id", transport["handshake_id"]).eq("status", "accepted").execute()
+        print(f"   ⏰ Hold extended to {new_expiry.strftime('%H:%M UTC')} (ambulance dispatched)")
 
     # Create ambulance assignment
     assignment = supabase.table("ambulance_assignments").insert({
@@ -430,7 +449,7 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
         "pickup_address": transport.get("pickup_address"),
         "destination_hospital_id": transport.get("destination_hospital_id"),
         "status": "dispatched",
-        "assigned_at": now,
+        "assigned_at": now.isoformat(),
     }).execute()
 
     assignment_id = assignment.data[0]["id"]
@@ -445,7 +464,7 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
     # Update ambulance status
     supabase.table("ambulances").update({
         "status": "dispatched",
-        "updated_at": now,
+        "updated_at": now.isoformat(),
     }).eq("id", request.ambulance_id).execute()
 
     # Update transport request
@@ -455,7 +474,7 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
         "accepted_by_company_id": request.company_id,
         "assignment_id": assignment_id,
         "crew_phone": crew_phone,
-        "resolved_at": now,
+        "resolved_at": now.isoformat(),
     }).eq("id", transport_id).execute()
     _sync_broadcast_patient_transport(
         transport_id=transport_id,
@@ -481,7 +500,7 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
         f"📞 Contact crew: *{crew_phone or 'N/A'}*\n\n"
         f"Stay at your pickup location. They're on their way.\n\n"
         f"Track your ambulance:\n"
-        f"{{FRONTEND_URL}}/transport/{transport_id}/track"
+        f"{settings.FRONTEND_URL}/transport/{transport_id}/track"
     ))
 
     # Notify crew — include transfer code
@@ -499,7 +518,7 @@ async def dispatch_respond(transport_id: str, request: DispatchResponse):
             f"{f'Transfer code: *{transfer_code}*' + chr(10) if transfer_code else ''}\n"
             f"Show the transfer code when you arrive at the hospital.\n\n"
             f"Update your status:\n"
-            f"{{FRONTEND_URL}}/ambulance/{request.ambulance_id}/crew"
+            f"{settings.FRONTEND_URL}/ambulance/{request.ambulance_id}/crew"
         ))
 
     print(f"   🚑 TRANSPORT: {company_name} dispatched {ambulance['vehicle_id']}")
@@ -622,3 +641,139 @@ async def get_dispatch_pending_transports():
 @router.post("/{transport_id}/reroute")
 async def reroute_transport(transport_id: str):
     return await reroute_transport_request(transport_id)
+
+# ---------------------------------------------------------------------------
+# POST /api/transport/{id}/cancel — patient cancels transport
+# ---------------------------------------------------------------------------
+
+@router.post("/{transport_id}/cancel")
+async def cancel_transport(transport_id: str):
+    """
+    Patient cancels their transport request.
+    Frees up the ambulance if one was assigned.
+    """
+    tr = supabase.table("transport_requests").select("*").eq("id", transport_id).execute()
+    if not tr.data:
+        raise HTTPException(status_code=404, detail="Transport request not found")
+
+    transport = tr.data[0]
+
+    if transport["status"] in ("no_ambulance", "cancelled"):
+        return {"status": "already_cancelled"}
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # If an ambulance was assigned, free it up
+    if transport.get("assignment_id"):
+        # Update assignment status
+        supabase.table("ambulance_assignments").update({
+            "status": "cancelled",
+        }).eq("id", transport["assignment_id"]).execute()
+
+        # Log the cancellation
+        supabase.table("ambulance_status_updates").insert({
+            "assignment_id": transport["assignment_id"],
+            "status": "cancelled",
+            "note": "Patient cancelled the transport request",
+        }).execute()
+
+        # Free up the ambulance
+        assign = supabase.table("ambulance_assignments").select("ambulance_id").eq("id", transport["assignment_id"]).execute()
+        if assign.data:
+            supabase.table("ambulances").update({
+                "status": "available",
+                "updated_at": now,
+            }).eq("id", assign.data[0]["ambulance_id"]).execute()
+
+        # Notify crew
+        if assign.data:
+            amb = supabase.table("ambulances").select("crew_phone, vehicle_id").eq("id", assign.data[0]["ambulance_id"]).execute()
+            if amb.data and amb.data[0].get("crew_phone"):
+                await send_text(amb.data[0]["crew_phone"], (
+                    f"❌ *Assignment cancelled — {amb.data[0]['vehicle_id']}*\n\n"
+                    f"The patient has cancelled the transport request.\n"
+                    f"You are now available for new assignments."
+                ))
+
+    # Cancel the transport request
+    supabase.table("transport_requests").update({
+        "status": "cancelled",
+        "resolved_at": now,
+    }).eq("id", transport_id).execute()
+
+    print(f"   ❌ TRANSPORT CANCELLED: {transport_id[:8]}")
+
+    return {"status": "cancelled"}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/handshakes/{id}/cancel — patient cancels bed reservation
+# ---------------------------------------------------------------------------
+
+@router.post("/cancel-reservation/{handshake_id}")
+async def cancel_reservation(handshake_id: str):
+    """
+    Patient cancels their bed reservation.
+    Restores the bed count and cancels any active transport.
+    """
+    hs = supabase.table("handshakes").select("*").eq("id", handshake_id).execute()
+    if not hs.data:
+        raise HTTPException(status_code=404, detail="Handshake not found")
+
+    handshake = hs.data[0]
+
+    if handshake["status"] not in ("requested", "accepted"):
+        return {"status": "already_resolved", "handshake_status": handshake["status"]}
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # If bed was accepted, restore the bed count
+    if handshake["status"] == "accepted":
+        hospital_id = handshake["receiving_hospital_id"]
+        bed_type = handshake["bed_type"]
+
+        bed_record = (
+            supabase.table("hospital_beds")
+            .select("id, available_count")
+            .eq("hospital_id", hospital_id)
+            .eq("bed_type", bed_type)
+            .execute()
+        )
+        if bed_record.data:
+            bed = bed_record.data[0]
+            new_count = (bed["available_count"] or 0) + 1
+            supabase.table("hospital_beds").update({
+                "available_count": new_count,
+            }).eq("id", bed["id"]).execute()
+
+    # Mark handshake as cancelled (using declined status with reason)
+    supabase.table("handshakes").update({
+        "status": "declined",
+        "declined_reason": "patient_cancelled",
+        "completed_at": now,
+    }).eq("id", handshake_id).execute()
+
+    # Cancel any active transport request for this handshake
+    transport = (
+        supabase.table("transport_requests")
+        .select("id, status")
+        .eq("handshake_id", handshake_id)
+        .execute()
+    ).data
+    if transport:
+        tr = transport[0]
+        if tr["status"] not in ("no_ambulance", "cancelled"):
+            await cancel_transport(tr["id"])
+
+    # Notify the hospital
+    hosp = supabase.table("hospitals").select("whatsapp_number, name").eq("id", handshake["receiving_hospital_id"]).execute()
+    if hosp.data and hosp.data[0].get("whatsapp_number"):
+        await send_text(hosp.data[0]["whatsapp_number"], (
+            f"ℹ️ Patient cancelled their bed reservation.\n"
+            f"Transfer code: *{handshake.get('transfer_code', 'N/A')}*\n"
+            f"The bed has been restored."
+        ))
+
+    print(f"   ❌ RESERVATION CANCELLED: {handshake_id[:8]}")
+
+    return {"status": "cancelled"}

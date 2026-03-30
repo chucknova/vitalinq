@@ -72,6 +72,15 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    from app.tasks.transport_timeout import check_transport_timeouts
+    scheduler.add_job(
+        check_transport_timeouts,
+        trigger=IntervalTrigger(seconds=60),
+        id="transport_timeout",
+        name="Auto-escalate stale transport requests",
+        replace_existing=True,
+    )
+
     scheduler.start()
     print("⏱️  Background scheduler started")
     print(f"   Jobs registered: {len(scheduler.get_jobs())}")

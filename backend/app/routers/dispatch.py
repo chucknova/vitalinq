@@ -17,6 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 from app.database import supabase
+from app.config import settings
 from app.services.whatsapp import send_text
 
 router = APIRouter(prefix="/dispatch", tags=["Dispatch"])
@@ -339,7 +340,7 @@ async def assign_ambulance(ambulance_id: str, request: AssignAmbulance):
             f"Pickup: {request.pickup_address or 'See dispatcher for location'}\n"
             f"Destination: {hospital_name or 'TBD'}\n\n"
             f"Update your status at:\n"
-            f"{{FRONTEND_URL}}/ambulance/{ambulance_id}/crew"
+            f"{settings.FRONTEND_URL}/ambulance/{ambulance_id}/crew"
         ))
 
     return {

@@ -392,6 +392,13 @@ export default function PulseMap() {
             <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
             Broadcasts
           </a>
+          <a
+            href="/dispatch/lasema"
+            className="flex items-center gap-1.5 rounded-full border border-blue-500/20 bg-[#0b1422]/88 px-3 py-1.5 text-xs text-blue-300 shadow-sm backdrop-blur-sm transition-all hover:bg-blue-500/10"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+            Dispatch
+          </a>
         </div>
 
         {/* {showWelcome && !loading && !tracking && (
