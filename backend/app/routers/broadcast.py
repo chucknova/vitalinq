@@ -13,15 +13,19 @@ PATCH  /api/broadcast/patients/{id}/position       — update ambulance GPS
 
 import math
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
-from app.database import supabase
+from app.database import supabase, execute_async
+from app.auth import get_current_user
 from app.routers.transport import start_transport_request_flow
+from app.services.dashboard_cache import get_summary, set_summary, invalidate_summary
 from app.services.whatsapp import send_text, send_buttons
 from app.services.search_engine import _parse_location
 
 router = APIRouter(prefix="/broadcast", tags=["Emergency Broadcast"])
+
+BROADCAST_SUMMARY_CACHE_TTL_SEC = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -37,16 +41,247 @@ def _haversine(lat1, lng1, lat2, lng2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _next_tag_number(broadcast_id: str) -> str:
+async def _next_tag_number(broadcast_id: str) -> str:
     """Generate the next MCI tag number for a broadcast."""
-    count = (
+    count = await execute_async(
         supabase.table("broadcast_patients")
         .select("id", count="exact")
         .eq("broadcast_id", broadcast_id)
-        .execute()
     )
     num = (count.count or 0) + 1
     return f"MCI-{num:03d}"
+
+
+async def _get_broadcast_or_404(broadcast_id: str) -> dict:
+    result = await execute_async(supabase.table("broadcasts").select("*").eq("id", broadcast_id))
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Broadcast not found")
+    return result.data[0]
+
+
+async def _load_broadcast_summary(broadcast_id: str) -> dict:
+    cached_summary = get_summary("broadcast_summary", broadcast_id)
+    if cached_summary is not None:
+        return cached_summary
+
+    broadcast = await _get_broadcast_or_404(broadcast_id)
+
+    response_rows = (
+        await execute_async(
+            supabase.table("broadcast_responses")
+            .select("status, icu_available, ward_available, emergency_available, surgical_available, maternity_available, pediatric_available")
+            .eq("broadcast_id", broadcast_id)
+        )
+    ).data or []
+
+    patients = (
+        await execute_async(
+            supabase.table("broadcast_patients")
+            .select("severity, status, assigned_hospital_id, transport_status, transport_id, ambulance_assignment_id")
+            .eq("broadcast_id", broadcast_id)
+        )
+    ).data or []
+
+    total_capacity = {
+        "icu": 0, "ward": 0, "emergency": 0,
+        "surgical": 0, "maternity": 0, "pediatric": 0,
+    }
+    for response in response_rows:
+        if response.get("status") != "responded":
+            continue
+        total_capacity["icu"] += response.get("icu_available", 0) or 0
+        total_capacity["ward"] += response.get("ward_available", 0) or 0
+        total_capacity["emergency"] += response.get("emergency_available", 0) or 0
+        total_capacity["surgical"] += response.get("surgical_available", 0) or 0
+        total_capacity["maternity"] += response.get("maternity_available", 0) or 0
+        total_capacity["pediatric"] += response.get("pediatric_available", 0) or 0
+
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "deceased": 0}
+    status_counts = {
+        "unassigned": 0,
+        "assigned": 0,
+        "dispatched": 0,
+        "en_route_to_patient": 0,
+        "at_scene": 0,
+        "en_route_to_hospital": 0,
+        "delivered": 0,
+        "admitted": 0,
+    }
+    for patient in patients:
+        severity = patient.get("severity", "medium")
+        if severity in severity_counts:
+            severity_counts[severity] += 1
+
+        effective_status = patient.get("status") or "unassigned"
+        if effective_status not in ("admitted", "deceased"):
+            if patient.get("ambulance_assignment_id"):
+                effective_status = patient.get("transport_status") or "assigned"
+            elif patient.get("transport_id") or patient.get("assigned_hospital_id"):
+                effective_status = "assigned"
+        if effective_status in status_counts:
+            status_counts[effective_status] += 1
+
+    summary = {
+        "broadcast": broadcast,
+        "response_count": len(response_rows),
+        "total_capacity": total_capacity,
+        "patient_stats": {
+            "total": len(patients),
+            "by_severity": severity_counts,
+            "by_status": status_counts,
+        },
+    }
+    return set_summary("broadcast_summary", broadcast_id, summary, BROADCAST_SUMMARY_CACHE_TTL_SEC)
+
+
+async def _load_broadcast_details(broadcast_id: str) -> dict:
+    broadcast = await _get_broadcast_or_404(broadcast_id)
+
+    responses = (
+        await execute_async(
+        supabase.table("broadcast_responses")
+        .select("*, hospitals(id, name, slug, address, location, hospital_type)")
+        .eq("broadcast_id", broadcast_id)
+        .order("responded_at", desc=True)
+        )
+    ).data or []
+
+    for response in responses:
+        hospital = response.get("hospitals", {})
+        if hospital and hospital.get("location"):
+            lat, lng = _parse_location(hospital["location"])
+            response["_hospital_lat"] = lat
+            response["_hospital_lng"] = lng
+            response["_distance"] = round(_haversine(broadcast["lat"], broadcast["lng"], lat, lng), 1) if lat else None
+
+    patients = (
+        await execute_async(
+        supabase.table("broadcast_patients")
+        .select("*")
+        .eq("broadcast_id", broadcast_id)
+        .order("created_at", desc=False)
+        )
+    ).data or []
+
+    hospital_ids = list(set(p["assigned_hospital_id"] for p in patients if p.get("assigned_hospital_id")))
+    hospitals_map = {}
+    if hospital_ids:
+        all_h = await execute_async(supabase.table("hospitals").select("id, name, slug, address").in_("id", hospital_ids))
+        hospitals_map = {h["id"]: h for h in (all_h.data or [])}
+
+    handshake_ids = list(set(p["handshake_id"] for p in patients if p.get("handshake_id")))
+    handshakes_map = {}
+    if handshake_ids:
+        all_hs = await execute_async(supabase.table("handshakes").select("id, status, transfer_code, accepted_at, completed_at, declined_reason, expires_at").in_("id", handshake_ids))
+        handshakes_map = {h["id"]: h for h in (all_hs.data or [])}
+
+    transport_ids = list(set(p["transport_id"] for p in patients if p.get("transport_id")))
+    transports_map = {}
+    if transport_ids:
+        all_tr = (
+            await execute_async(supabase.table("transport_requests")
+            .select("id, status, assignment_id, accepted_by_company_id, destination_hospital_id, crew_phone")
+            .in_("id", transport_ids)
+            )
+        )
+        transports_map = {t["id"]: t for t in (all_tr.data or [])}
+
+    assignment_ids = list(set(
+        (p.get("ambulance_assignment_id") or (transports_map.get(p.get("transport_id")) or {}).get("assignment_id"))
+        for p in patients
+        if p.get("ambulance_assignment_id") or (transports_map.get(p.get("transport_id")) or {}).get("assignment_id")
+    ))
+    assignments_map = {}
+    ambulance_ids = set()
+    if assignment_ids:
+        all_assignments = (
+            await execute_async(supabase.table("ambulance_assignments")
+            .select("id, ambulance_id, status")
+            .in_("id", assignment_ids)
+            )
+        )
+        assignments_map = {a["id"]: a for a in (all_assignments.data or [])}
+        ambulance_ids = {a["ambulance_id"] for a in assignments_map.values() if a.get("ambulance_id")}
+
+    updates_map = {}
+    if assignment_ids:
+        all_updates = (
+            await execute_async(supabase.table("ambulance_status_updates")
+            .select("assignment_id, status, note, created_at")
+            .in_("assignment_id", assignment_ids)
+            .order("created_at")
+            )
+        ).data or []
+        for update in all_updates:
+            assignment_id = update.get("assignment_id")
+            if not assignment_id:
+                continue
+            updates_map.setdefault(assignment_id, []).append(update)
+
+    ambulances_map = {}
+    if ambulance_ids:
+        all_ambulances = (
+            await execute_async(supabase.table("ambulances")
+            .select("id, vehicle_id, plate_number, type")
+            .in_("id", list(ambulance_ids))
+            )
+        )
+        ambulances_map = {a["id"]: a for a in (all_ambulances.data or [])}
+
+    for patient in patients:
+        patient["hospitals"] = hospitals_map.get(patient.get("assigned_hospital_id"))
+
+        handshake = handshakes_map.get(patient.get("handshake_id"))
+        if handshake:
+            patient["_handshake_status"] = handshake.get("status")
+            patient["_transfer_code"] = handshake.get("transfer_code")
+            patient["_declined_reason"] = handshake.get("declined_reason")
+            if handshake.get("status") == "accepted" and handshake.get("expires_at"):
+                expires_str = handshake["expires_at"]
+                if isinstance(expires_str, str):
+                    expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
+                    remaining = (expires_dt - datetime.now(timezone.utc)).total_seconds()
+                    patient["_hold_remaining_sec"] = max(0, int(remaining))
+        else:
+            patient["_handshake_status"] = None
+            patient["_transfer_code"] = None
+
+        transport = transports_map.get(patient.get("transport_id"))
+        assignment = assignments_map.get(
+            patient.get("ambulance_assignment_id") or (transport or {}).get("assignment_id")
+        )
+        ambulance = ambulances_map.get(assignment.get("ambulance_id")) if assignment else None
+        updates = updates_map.get(assignment.get("id")) if assignment else []
+        latest_update = updates[-1] if updates else None
+
+        patient["_transport_status"] = transport.get("status") if transport else patient.get("transport_status")
+        patient["_transport_contact_phone"] = transport.get("crew_phone") if transport else None
+        patient["_assignment_status"] = assignment.get("status") if assignment else None
+        patient["_ambulance"] = ambulance
+        patient["_crew_timeline"] = updates
+        patient["_crew_progress"] = latest_update.get("status") if latest_update else patient.get("_assignment_status")
+        patient["_crew_note"] = latest_update.get("note") if latest_update else None
+        if transport and transport.get("assignment_id") and not patient.get("ambulance_assignment_id"):
+            patient["ambulance_assignment_id"] = transport["assignment_id"]
+
+        if patient.get("status") not in ("admitted", "deceased"):
+            effective_status = "assigned" if patient.get("assigned_hospital_id") else "unassigned"
+            assignment_status = patient.get("_assignment_status")
+            transport_status = patient.get("_transport_status")
+
+            if assignment_status in ("assigned", "dispatched", "en_route_to_patient", "at_scene", "en_route_to_hospital", "delivered"):
+                effective_status = assignment_status
+            elif transport_status in ("asking_hospital", "asking_dispatch", "hospital_accepted", "dispatch_accepted", "no_ambulance", "rerouted", "reroute_failed"):
+                effective_status = "assigned"
+
+            patient["_display_status"] = effective_status
+        else:
+            patient["_display_status"] = patient.get("status")
+
+    return {
+        "responses": responses,
+        "patients": patients,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +328,7 @@ class BroadcastUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("")
-async def create_broadcast(request: BroadcastCreate):
+async def create_broadcast(request: BroadcastCreate, user: dict = Depends(get_current_user)):
     """
     Create an emergency broadcast.
     Finds all hospitals in radius and sends WhatsApp notification to each.
@@ -102,10 +337,11 @@ async def create_broadcast(request: BroadcastCreate):
 
     # Find hospitals in radius
     hospitals = (
+        await execute_async(
         supabase.table("hospitals")
         .select("id, name, whatsapp_number, location, hospital_type")
         .eq("is_active", True)
-        .execute()
+        )
     ).data
 
     in_radius = []
@@ -124,7 +360,7 @@ async def create_broadcast(request: BroadcastCreate):
         raise HTTPException(status_code=404, detail="No hospitals found in the specified radius")
 
     # Create broadcast record
-    broadcast = supabase.table("broadcasts").insert({
+    broadcast = await execute_async(supabase.table("broadcasts").insert({
         "title": request.title,
         "description": request.description,
         "lat": request.lat,
@@ -136,9 +372,10 @@ async def create_broadcast(request: BroadcastCreate):
         "hospitals_responded": 0,
         "created_by": request.created_by,
         "images": request.images if request.images else None,
-    }).execute()
+    }))
 
     broadcast_id = broadcast.data[0]["id"]
+    invalidate_summary("broadcast_summary", broadcast_id)
 
     # Send WhatsApp to each hospital
     sent_count = 0
@@ -176,14 +413,13 @@ async def create_broadcast(request: BroadcastCreate):
 # ---------------------------------------------------------------------------
 
 @router.get("")
-async def list_broadcasts():
+async def list_broadcasts(user: dict = Depends(get_current_user)):
     """List all broadcasts, active first, then by most recent."""
-    result = (
+    result = await execute_async(
         supabase.table("broadcasts")
         .select("*")
         .order("status", desc=False)
         .order("created_at", desc=True)
-        .execute()
     )
     return {"broadcasts": result.data or []}
 
@@ -193,205 +429,15 @@ async def list_broadcasts():
 # ---------------------------------------------------------------------------
 
 @router.get("/{broadcast_id}")
-async def get_broadcast(broadcast_id: str):
-    """Returns everything the broadcast dashboard needs."""
+async def get_broadcast(broadcast_id: str, user: dict = Depends(get_current_user)):
+    """Returns the lightweight broadcast dashboard summary."""
+    return await _load_broadcast_summary(broadcast_id)
 
-    # Broadcast record
-    bc = supabase.table("broadcasts").select("*").eq("id", broadcast_id).execute()
-    if not bc.data:
-        raise HTTPException(status_code=404, detail="Broadcast not found")
-    broadcast = bc.data[0]
 
-    # Responses
-    responses = (
-        supabase.table("broadcast_responses")
-        .select("*, hospitals(id, name, slug, address, location, hospital_type)")
-        .eq("broadcast_id", broadcast_id)
-        .order("responded_at", desc=True)
-        .execute()
-    ).data
-
-    # Parse hospital locations for responses
-    for r in responses:
-        h = r.get("hospitals", {})
-        if h and h.get("location"):
-            lat, lng = _parse_location(h["location"])
-            r["_hospital_lat"] = lat
-            r["_hospital_lng"] = lng
-            r["_distance"] = round(_haversine(broadcast["lat"], broadcast["lng"], lat, lng), 1) if lat else None
-
-    # Patients
-    patients = (
-        supabase.table("broadcast_patients")
-        .select("*")
-        .eq("broadcast_id", broadcast_id)
-        .order("created_at", desc=False)
-        .execute()
-    ).data
-
-    # Batch-fetch all assigned hospitals
-    hospital_ids = list(set(p["assigned_hospital_id"] for p in patients if p.get("assigned_hospital_id")))
-    hospitals_map = {}
-    if hospital_ids:
-        all_h = supabase.table("hospitals").select("id, name, slug, address").in_("id", hospital_ids).execute()
-        hospitals_map = {h["id"]: h for h in (all_h.data or [])}
-
-    # Batch-fetch all handshakes
-    handshake_ids = list(set(p["handshake_id"] for p in patients if p.get("handshake_id")))
-    handshakes_map = {}
-    if handshake_ids:
-        all_hs = supabase.table("handshakes").select("id, status, transfer_code, accepted_at, completed_at, declined_reason, expires_at").in_("id", handshake_ids).execute()
-        handshakes_map = {h["id"]: h for h in (all_hs.data or [])}
-
-    transport_ids = list(set(p["transport_id"] for p in patients if p.get("transport_id")))
-    transports_map = {}
-    if transport_ids:
-        all_tr = (
-            supabase.table("transport_requests")
-            .select("id, status, assignment_id, accepted_by_company_id, destination_hospital_id, crew_phone")
-            .in_("id", transport_ids)
-            .execute()
-        )
-        transports_map = {t["id"]: t for t in (all_tr.data or [])}
-
-    assignment_ids = list(set(
-        (p.get("ambulance_assignment_id") or (transports_map.get(p.get("transport_id")) or {}).get("assignment_id"))
-        for p in patients
-        if p.get("ambulance_assignment_id") or (transports_map.get(p.get("transport_id")) or {}).get("assignment_id")
-    ))
-    assignments_map = {}
-    ambulance_ids = set()
-    if assignment_ids:
-        all_assignments = (
-            supabase.table("ambulance_assignments")
-            .select("id, ambulance_id, status")
-            .in_("id", assignment_ids)
-            .execute()
-        )
-        assignments_map = {a["id"]: a for a in (all_assignments.data or [])}
-        ambulance_ids = {a["ambulance_id"] for a in assignments_map.values() if a.get("ambulance_id")}
-
-    updates_map = {}
-    if assignment_ids:
-        all_updates = (
-            supabase.table("ambulance_status_updates")
-            .select("assignment_id, status, note, created_at")
-            .in_("assignment_id", assignment_ids)
-            .order("created_at")
-            .execute()
-        ).data or []
-        for update in all_updates:
-            assignment_id = update.get("assignment_id")
-            if not assignment_id:
-                continue
-            updates_map.setdefault(assignment_id, []).append(update)
-
-    ambulances_map = {}
-    if ambulance_ids:
-        all_ambulances = (
-            supabase.table("ambulances")
-            .select("id, vehicle_id, plate_number, type")
-            .in_("id", list(ambulance_ids))
-            .execute()
-        )
-        ambulances_map = {a["id"]: a for a in (all_ambulances.data or [])}
-
-    # Enrich patients
-    for p in patients:
-        p["hospitals"] = hospitals_map.get(p.get("assigned_hospital_id"))
-
-        hs = handshakes_map.get(p.get("handshake_id"))
-        if hs:
-            p["_handshake_status"] = hs.get("status")
-            p["_transfer_code"] = hs.get("transfer_code")
-            p["_declined_reason"] = hs.get("declined_reason")
-            if hs.get("status") == "accepted" and hs.get("expires_at"):
-                expires_str = hs["expires_at"]
-                if isinstance(expires_str, str):
-                    expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
-                    remaining = (expires_dt - datetime.now(timezone.utc)).total_seconds()
-                    p["_hold_remaining_sec"] = max(0, int(remaining))
-        else:
-            p["_handshake_status"] = None
-            p["_transfer_code"] = None
-
-        transport = transports_map.get(p.get("transport_id"))
-        assignment = assignments_map.get(
-            p.get("ambulance_assignment_id") or (transport or {}).get("assignment_id")
-        )
-        ambulance = ambulances_map.get(assignment.get("ambulance_id")) if assignment else None
-        updates = updates_map.get(assignment.get("id")) if assignment else []
-        latest_update = updates[-1] if updates else None
-
-        p["_transport_status"] = transport.get("status") if transport else p.get("transport_status")
-        p["_transport_contact_phone"] = transport.get("crew_phone") if transport else None
-        p["_assignment_status"] = assignment.get("status") if assignment else None
-        p["_ambulance"] = ambulance
-        p["_crew_timeline"] = updates
-        p["_crew_progress"] = latest_update.get("status") if latest_update else p.get("_assignment_status")
-        p["_crew_note"] = latest_update.get("note") if latest_update else None
-        if transport and transport.get("assignment_id") and not p.get("ambulance_assignment_id"):
-            p["ambulance_assignment_id"] = transport["assignment_id"]
-
-        if p.get("status") not in ("admitted", "deceased"):
-            effective_status = "assigned" if p.get("assigned_hospital_id") else "unassigned"
-            assignment_status = p.get("_assignment_status")
-            transport_status = p.get("_transport_status")
-
-            if assignment_status in ("assigned", "dispatched", "en_route_to_patient", "at_scene", "en_route_to_hospital", "delivered"):
-                effective_status = assignment_status
-            elif transport_status in ("asking_hospital", "asking_dispatch", "hospital_accepted", "dispatch_accepted", "no_ambulance", "rerouted", "reroute_failed"):
-                effective_status = "assigned"
-
-            p["_display_status"] = effective_status
-        else:
-            p["_display_status"] = p.get("status")
-
-    # Aggregate capacity
-    total_capacity = {
-        "icu": 0, "ward": 0, "emergency": 0,
-        "surgical": 0, "maternity": 0, "pediatric": 0,
-    }
-    for r in responses:
-        if r.get("status") == "responded":
-            total_capacity["icu"] += r.get("icu_available", 0) or 0
-            total_capacity["ward"] += r.get("ward_available", 0) or 0
-            total_capacity["emergency"] += r.get("emergency_available", 0) or 0
-            total_capacity["surgical"] += r.get("surgical_available", 0) or 0
-            total_capacity["maternity"] += r.get("maternity_available", 0) or 0
-            total_capacity["pediatric"] += r.get("pediatric_available", 0) or 0
-
-    # Patient stats
-    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "deceased": 0}
-    status_counts = {
-        "unassigned": 0,
-        "assigned": 0,
-        "dispatched": 0,
-        "en_route_to_patient": 0,
-        "at_scene": 0,
-        "en_route_to_hospital": 0,
-        "delivered": 0,
-        "admitted": 0,
-    }
-    for p in patients:
-        sev = p.get("severity", "medium")
-        if sev in severity_counts:
-            severity_counts[sev] += 1
-        st = p.get("_display_status", p.get("status", "unassigned"))
-        if st in status_counts:
-            status_counts[st] += 1
-
-    return {
-        "broadcast": broadcast,
-        "responses": responses,
-        "patients": patients,
-        "total_capacity": total_capacity,
-        "patient_stats": {
-            "total": len(patients),
-            "by_severity": severity_counts,
-            "by_status": status_counts,
-        },
-    }
+@router.get("/{broadcast_id}/details")
+async def get_broadcast_details(broadcast_id: str, user: dict = Depends(get_current_user)):
+    """Returns the heavy patient and hospital detail for the broadcast dashboard."""
+    return await _load_broadcast_details(broadcast_id)
 
 
 # ---------------------------------------------------------------------------
@@ -399,9 +445,10 @@ async def get_broadcast(broadcast_id: str):
 # ---------------------------------------------------------------------------
 
 @router.patch("/{broadcast_id}")
-async def update_broadcast(broadcast_id: str, request: BroadcastUpdate):
+async def update_broadcast(broadcast_id: str, request: BroadcastUpdate, user: dict = Depends(get_current_user)):
     """Update broadcast status (resolve or cancel)."""
     now = datetime.now(timezone.utc).isoformat()
+    invalidate_summary("broadcast_summary", broadcast_id)
 
     bc = supabase.table("broadcasts").select("id").eq("id", broadcast_id).execute()
     if not bc.data:
@@ -420,11 +467,12 @@ async def update_broadcast(broadcast_id: str, request: BroadcastUpdate):
 # ---------------------------------------------------------------------------
 
 @router.delete("/{broadcast_id}")
-async def delete_broadcast(broadcast_id: str):
+async def delete_broadcast(broadcast_id: str, user: dict = Depends(get_current_user)):
     """Delete a broadcast and all related data (responses + patients)."""
     bc = supabase.table("broadcasts").select("id").eq("id", broadcast_id).execute()
     if not bc.data:
         raise HTTPException(status_code=404, detail="Broadcast not found")
+    invalidate_summary("broadcast_summary", broadcast_id)
 
     # CASCADE handles responses and patients (FK with ON DELETE CASCADE)
     supabase.table("broadcasts").delete().eq("id", broadcast_id).execute()
@@ -437,8 +485,9 @@ async def delete_broadcast(broadcast_id: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/{broadcast_id}/patients")
-async def log_patient(broadcast_id: str, request: PatientLog):
+async def log_patient(broadcast_id: str, request: PatientLog, user: dict = Depends(get_current_user)):
     """Paramedic logs a new patient at the scene."""
+    invalidate_summary("broadcast_summary", broadcast_id)
 
     bc = supabase.table("broadcasts").select("id, status").eq("id", broadcast_id).execute()
     if not bc.data:
@@ -450,7 +499,7 @@ async def log_patient(broadcast_id: str, request: PatientLog):
     if request.severity not in valid_severities:
         raise HTTPException(status_code=400, detail=f"Invalid severity. Must be one of: {valid_severities}")
 
-    tag = _next_tag_number(broadcast_id)
+    tag = await _next_tag_number(broadcast_id)
 
     patient = supabase.table("broadcast_patients").insert({
         "broadcast_id": broadcast_id,
@@ -512,7 +561,7 @@ async def get_patient(patient_id: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/patients/{patient_id}/assign")
-async def assign_patient(patient_id: str, request: PatientAssign):
+async def assign_patient(patient_id: str, request: PatientAssign, user: dict = Depends(get_current_user)):
     """Assign a patient to a hospital. Creates a handshake and notifies the hospital."""
 
     # Fetch patient
@@ -520,6 +569,7 @@ async def assign_patient(patient_id: str, request: PatientAssign):
     if not pt.data:
         raise HTTPException(status_code=404, detail="Patient not found")
     patient = pt.data[0]
+    invalidate_summary("broadcast_summary", patient["broadcast_id"])
 
     if patient["status"] not in ("unassigned", "assigned"):
         raise HTTPException(status_code=400, detail=f"Patient is already {patient['status']}")
@@ -591,7 +641,7 @@ async def assign_patient(patient_id: str, request: PatientAssign):
 # ---------------------------------------------------------------------------
 
 @router.post("/patients/{patient_id}/dispatch")
-async def dispatch_patient_transport(patient_id: str):
+async def dispatch_patient_transport(patient_id: str, user: dict = Depends(get_current_user)):
     """
     Turn an assigned broadcast patient into a real transport request.
 
@@ -603,6 +653,7 @@ async def dispatch_patient_transport(patient_id: str):
         raise HTTPException(status_code=404, detail="Patient not found")
 
     patient = pt.data[0]
+    invalidate_summary("broadcast_summary", patient["broadcast_id"])
 
     if not patient.get("assigned_hospital_id"):
         raise HTTPException(status_code=400, detail="Patient must be assigned to a hospital first")
@@ -692,8 +743,9 @@ async def dispatch_patient_transport(patient_id: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/{broadcast_id}/auto-distribute")
-async def auto_distribute(broadcast_id: str, request: AutoDistributePreview):
+async def auto_distribute(broadcast_id: str, request: AutoDistributePreview, user: dict = Depends(get_current_user)):
     """
+    invalidate_summary("broadcast_summary", broadcast_id)
     Auto-assign all unassigned patients to responding hospitals.
     If confirm=false, returns a preview. If confirm=true, executes assignments.
     """

@@ -15,11 +15,12 @@ import { useParams, Link } from 'react-router-dom';
 import Map, { Marker, NavigationControl } from 'react-map-gl/mapbox';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import {
-  ArrowLeft, Radio, RefreshCw, Clock3, Users, Check, X,
+  Radio, RefreshCw, Clock3, Users, Check, X,
   AlertTriangle, Loader2, Zap, Building2, Ambulance, MapPin,
   CircleDot, ClipboardList
 } from 'lucide-react';
 import api from '../lib/api';
+import HistoryNav from '../components/HistoryNav';
 
 const SEVERITY_CONFIG = {
   critical: { label: 'Critical', badge: 'bg-red-50 text-red-600 border-red-100', dot: 'bg-red-500' },
@@ -63,6 +64,8 @@ const TRANSPORT_STATUS_CONFIG = {
   en_route_to_hospital: { label: 'Going to the hospital', tone: 'bg-sky-50 text-sky-700 border-sky-100' },
   delivered: { label: 'Arrived at hospital', tone: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
 };
+
+const DASHBOARD_POLL_MS = 10000;
 
 function canStartRealDispatch(patient) {
   return getDisplayStatus(patient) === 'assigned' && !patient.transport_id && !patient._transport_status;
@@ -126,6 +129,8 @@ export default function BroadcastDashboard() {
   const { id } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [detailsLoading, setDetailsLoading] = useState(true);
+  const [detailsLoaded, setDetailsLoaded] = useState(false);
   const [error, setError] = useState(null);
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [actionLoading, setActionLoading] = useState({});
@@ -134,11 +139,17 @@ export default function BroadcastDashboard() {
   const [lastRefresh, setLastRefresh] = useState(null);
   const mapRef = useRef(null);
   const intervalRef = useRef(null);
+  const detailsTickRef = useRef(0);
 
-  const fetchData = useCallback(async () => {
+  const fetchSummary = useCallback(async () => {
     try {
       const res = await api.get(`/api/broadcast/${id}`);
-      setData(res.data);
+      setData((prev) => ({
+        ...prev,
+        ...res.data,
+        responses: prev?.responses || [],
+        patients: prev?.patients || [],
+      }));
       setLastRefresh(new Date());
       setError(null);
     } catch {
@@ -148,11 +159,45 @@ export default function BroadcastDashboard() {
     }
   }, [id]);
 
+  const fetchDetails = useCallback(async () => {
+    try {
+      setDetailsLoading(true);
+      const res = await api.get(`/api/broadcast/${id}/details`);
+      setData((prev) => ({
+        ...prev,
+        ...res.data,
+      }));
+      setDetailsLoaded(true);
+      setError(null);
+    } catch {
+      setError('Failed to load broadcast details.');
+    } finally {
+      setDetailsLoading(false);
+      setLoading(false);
+    }
+  }, [id]);
+
+  const refreshData = useCallback(async ({ includeDetails = false } = {}) => {
+    await fetchSummary();
+    if (includeDetails) {
+      await fetchDetails();
+    }
+  }, [fetchDetails, fetchSummary]);
+
   useEffect(() => {
-    fetchData();
-    intervalRef.current = setInterval(fetchData, 5000);
+    setData(null);
+    setLoading(true);
+    setDetailsLoading(true);
+    setDetailsLoaded(false);
+    detailsTickRef.current = 0;
+    refreshData({ includeDetails: true });
+    intervalRef.current = setInterval(() => {
+      const includeDetails = detailsTickRef.current % 2 === 0;
+      detailsTickRef.current += 1;
+      refreshData({ includeDetails });
+    }, DASHBOARD_POLL_MS);
     return () => clearInterval(intervalRef.current);
-  }, [fetchData]);
+  }, [refreshData]);
 
   async function handleAssign(patientId, hospitalId) {
     setActionLoading((prev) => ({ ...prev, [`assign_${patientId}`]: true }));
@@ -161,7 +206,7 @@ export default function BroadcastDashboard() {
         hospital_id: hospitalId,
       });
       setSelectedPatient(null);
-      await fetchData();
+      await refreshData({ includeDetails: true });
     } catch (err) {
       console.error('Assignment failed:', err);
     } finally {
@@ -175,7 +220,7 @@ export default function BroadcastDashboard() {
       const res = await api.post(`/api/broadcast/${id}/auto-distribute`, { confirm });
       if (confirm) {
         setAutoDistPreview(null);
-        await fetchData();
+        await refreshData({ includeDetails: true });
       } else {
         setAutoDistPreview(res.data);
       }
@@ -189,7 +234,7 @@ export default function BroadcastDashboard() {
   async function handleResolve() {
     try {
       await api.patch(`/api/broadcast/${id}`, { status: 'resolved' });
-      await fetchData();
+      await refreshData({ includeDetails: true });
     } catch (err) {
       console.error('Resolve failed:', err);
     }
@@ -203,7 +248,7 @@ export default function BroadcastDashboard() {
         if (!prev) return prev;
         return {
           ...prev,
-          patients: prev.patients.map((patient) => (
+          patients: (prev.patients || []).map((patient) => (
             patient.id === patientId
               ? {
                   ...patient,
@@ -214,7 +259,7 @@ export default function BroadcastDashboard() {
           )),
         };
       });
-      await fetchData();
+      await refreshData({ includeDetails: true });
     } catch (err) {
       console.error('Dispatch failed:', err);
     } finally {
@@ -249,7 +294,7 @@ export default function BroadcastDashboard() {
     );
   }
 
-  const { broadcast, responses, patients, total_capacity, patient_stats } = data;
+  const { broadcast, responses = [], patients = [], total_capacity, patient_stats } = data;
   const isActive = broadcast.status === 'active';
 
   const filteredPatients = patients.filter((patient) => {
@@ -302,7 +347,7 @@ export default function BroadcastDashboard() {
                       icon={Clock3}
                       label="Started"
                       value={timeSince(broadcast.created_at)}
-                      sub="Refreshes every 5 seconds"
+                      sub="Summary every 10s, detail every 20s"
                     />
                   </div>
                 </div>
@@ -365,7 +410,9 @@ export default function BroadcastDashboard() {
                     </div>
                   </div>
 
-                  {filteredPatients.length === 0 ? (
+                  {!detailsLoaded && detailsLoading ? (
+                    <div className="py-16 text-center text-sm text-slate-500">Loading patient details...</div>
+                  ) : filteredPatients.length === 0 ? (
                     <div className="py-16 text-center text-sm text-slate-500">
                       No patients logged yet.
                       <Link to={`/broadcast/${id}/log`} className="ml-1 font-medium text-sky-600 hover:underline">
@@ -506,7 +553,9 @@ export default function BroadcastDashboard() {
                     ))}
                   </div>
 
-                  {responses.length === 0 ? (
+                  {!detailsLoaded && detailsLoading ? (
+                    <div className="py-16 text-center text-sm text-slate-500">Loading hospital responses...</div>
+                  ) : responses.length === 0 ? (
                     <div className="py-16 text-center text-sm text-slate-500">Waiting for hospitals to respond...</div>
                   ) : (
                     <div className="mt-5 max-h-[calc(100vh-420px)] space-y-3 overflow-y-auto pr-1">
@@ -538,9 +587,7 @@ function TopBar({ broadcast, id, isActive, lastRefresh, onResolve }) {
   return (
     <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
       <div className="flex flex-wrap items-center gap-3">
-        <Link to="/" className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
-          <ArrowLeft size={16} />
-        </Link>
+        <HistoryNav backFallback="/broadcast" />
         <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
           <Radio size={13} className={isActive ? 'text-red-400' : 'text-slate-400'} />
           Broadcast

@@ -20,7 +20,7 @@ Usage:
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
-from app.database import supabase
+from app.database import supabase, execute_async
 
 
 # ---------------------------------------------------------------------------
@@ -62,10 +62,11 @@ async def create_handshake(
     # Ensure transfer code is unique (extremely unlikely to collide, but be safe)
     for _ in range(5):
         existing = (
+            await execute_async(
             supabase.table("handshakes")
             .select("id")
             .eq("transfer_code", transfer_code)
-            .execute()
+            )
         )
         if not existing.data:
             break
@@ -84,7 +85,7 @@ async def create_handshake(
         "hold_duration_min": hold_duration_min,
     }
 
-    result = supabase.table("handshakes").insert(row).execute()
+    result = await execute_async(supabase.table("handshakes").insert(row))
     handshake = result.data[0]
 
     print(f"🤝 HANDSHAKE CREATED: {handshake['id'][:8]}... code={transfer_code}")
@@ -103,12 +104,11 @@ async def accept_handshake(handshake_id: str) -> dict | None:
     - Sets expires_at (now + hold_duration)
     - Decrements available_count for that bed type at that hospital
     """
-    result = (
+    result = await execute_async(
         supabase.table("handshakes")
         .select("*")
         .eq("id", handshake_id)
         .eq("status", "requested")
-        .execute()
     )
 
     if not result.data:
@@ -134,7 +134,7 @@ async def accept_handshake_record(handshake: dict) -> dict | None:
     expires_at = now + timedelta(minutes=hold_minutes)
 
     # Update handshake
-    updated = (
+    updated = await execute_async(
         supabase.table("handshakes")
         .update({
             "status": "accepted",
@@ -142,27 +142,25 @@ async def accept_handshake_record(handshake: dict) -> dict | None:
             "expires_at": expires_at.isoformat(),
         })
         .eq("id", handshake_id)
-        .execute()
     )
 
     # Decrement bed count
     hospital_id = handshake["receiving_hospital_id"]
     bed_type = handshake["bed_type"]
 
-    bed_record = (
+    bed_record = await execute_async(
         supabase.table("hospital_beds")
         .select("id, available_count")
         .eq("hospital_id", hospital_id)
         .eq("bed_type", bed_type)
-        .execute()
     )
 
     if bed_record.data:
         bed = bed_record.data[0]
         new_count = max(0, (bed["available_count"] or 0) - 1)
-        supabase.table("hospital_beds").update({
+        await execute_async(supabase.table("hospital_beds").update({
             "available_count": new_count,
-        }).eq("id", bed["id"]).execute()
+        }).eq("id", bed["id"]))
 
     print(f"✅ HANDSHAKE ACCEPTED: {handshake_id[:8]}... expires={expires_at.strftime('%H:%M UTC')}")
     return updated.data[0] if updated.data else handshake
@@ -174,40 +172,37 @@ async def accept_handshake_record(handshake: dict) -> dict | None:
 
 async def decline_handshake(handshake_id: str, reason: str | None = None) -> dict | None:
     """Hospital declines the bed hold."""
-    result = (
+    result = await execute_async(
         supabase.table("handshakes")
         .select("*")
         .eq("id", handshake_id)
         .eq("status", "requested")
-        .execute()
     )
 
     if not result.data:
         return None
 
-    updated = (
+    updated = await execute_async(
         supabase.table("handshakes")
         .update({
             "status": "declined",
             "declined_reason": reason,
         })
         .eq("id", handshake_id)
-        .execute()
     )
 
     # If this handshake is linked to a broadcast patient, reset them to unassigned
-    bp = (
+    bp = await execute_async(
         supabase.table("broadcast_patients")
         .select("id")
         .eq("handshake_id", handshake_id)
-        .execute()
     )
     if bp.data:
-        supabase.table("broadcast_patients").update({
+        await execute_async(supabase.table("broadcast_patients").update({
             "status": "unassigned",
             "assigned_hospital_id": None,
             "handshake_id": None,
-        }).eq("handshake_id", handshake_id).execute()
+        }).eq("handshake_id", handshake_id))
         print(f"   ↩️ MCI patient reset to unassigned (hospital declined)")
 
     print(f"❌ HANDSHAKE DECLINED: {handshake_id[:8]}...")
@@ -222,12 +217,11 @@ async def complete_handshake(handshake_id: str, transfer_code: str) -> dict | No
     """
     Patient arrived. Verify transfer code and mark as completed.
     """
-    result = (
+    result = await execute_async(
         supabase.table("handshakes")
         .select("*")
         .eq("id", handshake_id)
         .eq("status", "accepted")
-        .execute()
     )
 
     if not result.data:
@@ -241,14 +235,13 @@ async def complete_handshake(handshake_id: str, transfer_code: str) -> dict | No
         return None
 
     now = datetime.now(timezone.utc)
-    updated = (
+    updated = await execute_async(
         supabase.table("handshakes")
         .update({
             "status": "completed",
             "completed_at": now.isoformat(),
         })
         .eq("id", handshake_id)
-        .execute()
     )
 
     print(f"🏁 HANDSHAKE COMPLETED: {handshake_id[:8]}...")

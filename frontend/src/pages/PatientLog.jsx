@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
-  Clock, CheckCircle2, XCircle, AlertCircle, Timer, ArrowLeft,
+  Clock, CheckCircle2, XCircle, AlertCircle, Timer,
   RefreshCw, ClipboardList, CircleDot, ChevronRight, Building2, Activity
 } from 'lucide-react';
 import api from '../lib/api';
+import HistoryNav from '../components/HistoryNav';
 
 const STATUS_CONFIG = {
   requested: {
@@ -220,9 +221,7 @@ function TopBar({ hospital, slug, now }) {
   return (
     <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
       <div className="flex flex-wrap items-center gap-3">
-        <Link to="/" className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
-          <ArrowLeft size={16} />
-        </Link>
+        <HistoryNav backFallback={`/hospital/${slug}/dashboard`} />
         <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
           <CircleDot size={12} className="text-sky-400" />
           Patient Log

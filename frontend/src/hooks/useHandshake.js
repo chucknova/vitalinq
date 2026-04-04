@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import api from '../lib/api';
 
+const ACTIVE_POLL_MS = 5000;
+const STABLE_POLL_MS = 15000;
+
 /**
  * useHandshake — polls a handshake's status and manages countdown timer.
  *
@@ -15,19 +18,21 @@ export default function useHandshake(handshakeId) {
   const [countdown, setCountdown] = useState(null);
   const pollRef = useRef(null);
   const timerRef = useRef(null);
+  const pollMsRef = useRef(null);
+
+  function nextPollInterval(status) {
+    if (status === 'requested') return ACTIVE_POLL_MS;
+    if (status === 'accepted') return STABLE_POLL_MS;
+    return ACTIVE_POLL_MS;
+  }
 
   // Polling
   useEffect(() => {
-    if (!handshakeId) {
-      setHandshake(null);
-      setCountdown(null);
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
+    if (!handshakeId) return;
 
     async function poll() {
+      setLoading(true);
+      setError(null);
       try {
         const res = await api.get(`/api/handshakes/${handshakeId}`);
         setHandshake(res.data);
@@ -44,6 +49,14 @@ export default function useHandshake(handshakeId) {
           clearInterval(pollRef.current);
           pollRef.current = null;
           setCountdown(null);
+          return;
+        }
+
+        const nextInterval = nextPollInterval(res.data.status);
+        if (!pollRef.current || pollMsRef.current !== nextInterval) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = setInterval(poll, nextInterval);
+          pollMsRef.current = nextInterval;
         }
       } catch (err) {
         console.error('Handshake poll failed:', err);
@@ -55,11 +68,9 @@ export default function useHandshake(handshakeId) {
     // First fetch immediately
     poll();
 
-    // Poll every 3 seconds
-    pollRef.current = setInterval(poll, 3000);
-
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      pollMsRef.current = null;
     };
   }, [handshakeId]);
 

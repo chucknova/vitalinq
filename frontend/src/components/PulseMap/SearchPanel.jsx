@@ -4,7 +4,7 @@
  * Steps:
  *   1. Search (Smart Triage or Nearby)
  *   2. Results list (pick a hospital)
- *   3. Patient details (name, phone, condition)
+ *   3. Contact details (phone, emergency contact, condition)
  *   4. Live status tracker (polling handshake until resolved)
  */
 
@@ -13,7 +13,7 @@ import {
   Brain, MapPin, ChevronLeft, ChevronRight, X,
   Loader2, AlertTriangle, ArrowLeft, Phone, User, FileText,
   CheckCircle2, Clock, Navigation, Copy, Check, Ambulance, LocateFixed, Building2,
-  Bell, BedDouble, MapPinned, RefreshCcw, ShieldAlert
+  Bell, BedDouble, MapPinned, RefreshCcw, ShieldAlert, Mic, MicOff
 } from 'lucide-react';
 import api from '../../lib/api';
 import useHandshake from '../../hooks/useHandshake';
@@ -32,6 +32,11 @@ const INITIAL_CHAT_MESSAGES = [
     content: 'Tell me what’s going on by describing the emergency, and I’ll help you find the right care nearby.',
   },
 ];
+
+function getSpeechRecognition() {
+  if (typeof window === 'undefined') return null;
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
 
 function formatConditionLabel(value) {
   return value?.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()) || 'Care match';
@@ -59,11 +64,14 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [triageAnalysis, setTriageAnalysis] = useState(null);
   const [error, setError] = useState(null);
   const [clinicResults, setClinicResults] = useState(null);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [voiceInterim, setVoiceInterim] = useState('');
 
   // Booking state
   const [selectedResult, setSelectedResult] = useState(null);
-  const [patientName, setPatientName] = useState('');
   const [patientPhone, setPatientPhone] = useState('');
+  const [emergencyPhone, setEmergencyPhone] = useState('');
   const [patientCondition, setPatientCondition] = useState('');
   const [handshakeId, setHandshakeId] = useState(null);
   const [transferCode, setTransferCode] = useState(null);
@@ -77,8 +85,14 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [holdInfo, setHoldInfo] = useState(null); // { minutes, driveEstimate, distanceKm }
   const [holdExtended, setHoldExtended] = useState(false);
+  const recognitionRef = useRef(null);
+  const baseTranscriptRef = useRef('');
 
   // ── Restore session from sessionStorage on mount ────────
+  useEffect(() => {
+    setVoiceSupported(Boolean(getSpeechRecognition()));
+  }, []);
+
   useEffect(() => {
     try {
       const saved = sessionStorage.getItem('bedsignal_session');
@@ -89,17 +103,22 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           setTransferCode(s.transferCode || null);
           setTransportId(s.transportId || null);
           setSelectedResult(s.selectedResult || null);
-          setPatientName(s.patientName || '');
           setPatientPhone(s.patientPhone || '');
+          setEmergencyPhone(s.emergencyPhone || '');
           setStep(STEPS.TRACKING);
         }
       }
-    } catch {}
+    } catch {
+      // Ignore corrupted session data and start fresh.
+    }
   }, []);
 
   // Live status polling
   const { handshake, countdown } = useHandshake(handshakeId);
   const hasAmbulanceReroute = handshake?.status === 'overridden' && transportData?._rerouted;
+  const requestPhone = handshake?.parsed_requirements?.contact_phone || patientPhone;
+  const requestEmergencyPhone = handshake?.parsed_requirements?.emergency_contact_phone || emergencyPhone;
+  const requestSummary = handshake?.patient_summary || patientCondition || description;
 
   // Poll transport status when we have a transport request
   useEffect(() => {
@@ -107,7 +126,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     let active = true;
     const poll = async () => {
       try {
-        const res = await api.get(`/api/transport/${transportId}`);
+        const res = await api.get(`/api/transport/${transportId}?include_timeline=1`);
         if (active) setTransportData(res.data);
       } catch {
         // Ignore transport polling errors and try again on the next interval.
@@ -134,7 +153,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   // Clear persisted session when handshake reaches a terminal state
   useEffect(() => {
     if (handshake?.status && ['completed', 'expired'].includes(handshake.status)) {
-      try { sessionStorage.removeItem('bedsignal_session'); } catch {}
+      try { sessionStorage.removeItem('bedsignal_session'); } catch {
+        // Session storage may be unavailable in some browsers.
+      }
     }
   }, [handshake?.status]);
 
@@ -225,6 +246,18 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     };
   }, [handshake?.status, handshakeId, hospitals, onStartTracking, selectedResult]);
 
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.onstart = null;
+        recognitionRef.current.onresult = null;
+        recognitionRef.current.onerror = null;
+        recognitionRef.current.onend = null;
+        recognitionRef.current.stop();
+      }
+    };
+  }, []);
+
   function summarizeConversation(messages) {
     return messages
       .filter((message) => message.role === 'user')
@@ -293,6 +326,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
   async function handleTriageSearch(e) {
     e.preventDefault();
     if (!chatInput.trim()) return;
+    stopVoiceInput();
 
     const userMessage = { role: 'user', content: chatInput.trim() };
     const nextMessages = [...chatMessages, userMessage];
@@ -351,6 +385,98 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
       setError('Search failed. Please try again.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  function stopVoiceInput() {
+    if (!recognitionRef.current) return;
+    recognitionRef.current.stop();
+  }
+
+  function handleVoiceToggle() {
+    const SpeechRecognition = getSpeechRecognition();
+    if (!SpeechRecognition) {
+      setError('Voice input is not supported in this browser. You can still type your message.');
+      return;
+    }
+
+    if (isListening) {
+      stopVoiceInput();
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-NG';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    baseTranscriptRef.current = chatInput.trim() ? `${chatInput.trim()} ` : '';
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      setVoiceInterim('');
+      setError(null);
+    };
+
+    recognition.onresult = (event) => {
+      let finalTranscript = '';
+      let interimTranscript = '';
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result[0]?.transcript || '';
+        if (result.isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      const nextCommitted = `${baseTranscriptRef.current}${finalTranscript}`.trim();
+      if (finalTranscript) {
+        baseTranscriptRef.current = nextCommitted ? `${nextCommitted} ` : '';
+      }
+
+      const composedInput = `${baseTranscriptRef.current}${interimTranscript}`.trim();
+      setChatInput(composedInput);
+      setVoiceInterim(interimTranscript.trim());
+    };
+
+    recognition.onerror = (event) => {
+      setIsListening(false);
+      setVoiceInterim('');
+
+      if (event.error === 'not-allowed') {
+        setError('Microphone access was blocked. Please allow microphone access and try again.');
+        return;
+      }
+
+      if (event.error === 'no-speech') {
+        setError('No speech was detected. Please try again.');
+        return;
+      }
+
+      if (event.error !== 'aborted') {
+        setError('Voice input failed. Please try again or type your message.');
+      }
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      setVoiceInterim('');
+      recognitionRef.current = null;
+    };
+
+    recognitionRef.current = recognition;
+
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setIsListening(false);
+      setVoiceInterim('');
+      setError('Voice input could not start. Please try again or type your message.');
     }
   }
 
@@ -414,14 +540,22 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
         // GPS or Mapbox failed — use default 45 min
       }
 
+      const parsedRequirements = {
+        ...(triageAnalysis && typeof triageAnalysis === 'object' ? triageAnalysis : {}),
+        contact_phone: patientPhone.trim(),
+      };
+      if (emergencyPhone.trim()) {
+        parsedRequirements.emergency_contact_phone = emergencyPhone.trim();
+      }
+
       const res = await api.post('/api/handshakes', {
         receiving_hospital_id: selectedResult.hospital_id,
         bed_type: Object.keys(selectedResult.beds || {})[0] || 'emergency',
         requesting_party_type: 'individual',
         requesting_party_phone: patientPhone.trim(),
-        patient_summary: `${patientName ? patientName + '. ' : ''}${patientCondition || description || 'Emergency'}`.trim(),
+        patient_summary: `${patientCondition || description || 'Emergency'}`.trim(),
         hold_duration_min: holdMin,
-        parsed_requirements: triageAnalysis || undefined,
+        parsed_requirements: parsedRequirements,
       });
 
       setHandshakeId(res.data.handshake_id);
@@ -435,10 +569,12 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           handshakeId: res.data.handshake_id,
           transferCode: res.data.transfer_code,
           selectedResult,
-          patientName: patientName.trim(),
           patientPhone: patientPhone.trim(),
+          emergencyPhone: emergencyPhone.trim(),
         }));
-      } catch {}
+      } catch {
+        // Ignore session persistence failures.
+      }
     } catch (error) {
       console.error('Bed booking failed:', error);
       setError('Failed to create bed reservation. Please try again.');
@@ -449,14 +585,15 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
   // ── Reset everything ───────────────────────────────────
   function handleReset() {
+    stopVoiceInput();
     setStep(STEPS.SEARCH);
     setDescription('');
     setChatMessages(INITIAL_CHAT_MESSAGES);
     setChatInput('');
     setTriageAnalysis(null);
     setSelectedResult(null);
-    setPatientName('');
     setPatientPhone('');
+    setEmergencyPhone('');
     setPatientCondition('');
     setHandshakeId(null);
     setTransferCode(null);
@@ -469,10 +606,14 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
     setClinicResults(null);
     setRerouteResults(null);
     setRerouteLoading(false);
+    setIsListening(false);
+    setVoiceInterim('');
     onClear();
 
     // Clear persisted session
-    try { sessionStorage.removeItem('bedsignal_session'); } catch {}
+    try { sessionStorage.removeItem('bedsignal_session'); } catch {
+      // Session storage may be unavailable in some browsers.
+    }
   }
 
   function copyCode() {
@@ -508,7 +649,9 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           s.transportId = res.data.transport_id;
           sessionStorage.setItem('bedsignal_session', JSON.stringify(s));
         }
-      } catch {}
+      } catch {
+        // Ignore session persistence failures.
+      }
     } catch (error) {
       console.error('Transport request failed:', error);
       setError(error.response?.data?.detail || 'Failed to request transport.');
@@ -577,7 +720,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
             </button>
           )}
           <div>
-            <h2 className="text-[1.45rem] font-semibold tracking-tight text-white">
+            <h2 className="text-[1.2rem] font-semibold tracking-tight text-white sm:text-[1.45rem]">
               {step === STEPS.SEARCH && 'Find care nearby'}
               {step === STEPS.RESULTS && 'Choose a place'}
               {step === STEPS.LOW_URGENCY && 'Clinic options'}
@@ -740,15 +883,39 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
               <div className="border-t border-white/[0.06] bg-[#0c1626] pt-2 px-6 py-5">
               <form onSubmit={handleTriageSearch} className="mx-auto flex max-w-[420px] flex-col gap-3">
-                  <textarea
-                    id="triage-chat-input"
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="Message Vitalinq..."
-                    rows={2}
-                    maxLength={500}
-                    className="max-h-32 w-full resize-none overflow-y-auto rounded-[12px] border border-white/[0.08] bg-white/[0.05] px-4 py-3 text-sm leading-6 text-white placeholder:text-slate-500 focus:border-sky-500/60 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
-                  />
+                  <div className="rounded-[14px] border border-white/[0.08] bg-white/[0.05] p-2 focus-within:border-sky-500/60 focus-within:ring-2 focus-within:ring-sky-500/20">
+                    <textarea
+                      id="triage-chat-input"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Message Vitalinq..."
+                      rows={2}
+                      maxLength={500}
+                      className="max-h-32 w-full resize-none overflow-y-auto bg-transparent px-2 py-1 text-sm leading-6 text-white placeholder:text-slate-500 focus:outline-none"
+                    />
+                    <div className="flex items-center justify-between gap-3 border-t border-white/[0.06] px-2 pt-2">
+                      <div className="min-h-[20px] text-[11px] text-slate-400">
+                        {isListening
+                          ? (voiceInterim ? `Listening: "${voiceInterim}"` : 'Listening...')
+                          : voiceSupported
+                            ? 'Tap the mic to speak instead of typing.'
+                            : 'Voice input works in supported browsers like Chrome.'}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleVoiceToggle}
+                        aria-pressed={isListening}
+                        aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+                        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border transition-all focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08111d] ${
+                          isListening
+                            ? 'border-red-400/40 bg-red-500/15 text-red-200 hover:bg-red-500/20'
+                            : 'border-white/[0.08] bg-white/[0.04] text-slate-300 hover:border-sky-500/40 hover:text-white'
+                        }`}
+                      >
+                        {isListening ? <MicOff size={16} /> : <Mic size={16} />}
+                      </button>
+                    </div>
+                  </div>
                 <button
                   type="submit"
                   disabled={loading || !chatInput.trim()}
@@ -1062,25 +1229,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
           )}
 
           <form onSubmit={handleBookBed} className="space-y-4">
-            {/* Name */}
-            <div>
-              <label htmlFor="patient-name" className="mb-2 block text-sm font-medium text-slate-200">
-                Person's name
-              </label>
-              <div className="relative">
-                <User size={15} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" />
-                <input
-                  id="patient-name"
-                  type="text"
-                  value={patientName}
-                  onChange={(e) => setPatientName(e.target.value)}
-                  placeholder="e.g. John Doe"
-                  className="h-[50px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] pl-10 pr-4 text-sm text-white placeholder:text-slate-500 focus:border-sky-500/60 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
-                />
-              </div>
-            </div>
-
-            {/* Phone */}
+            {/* Main phone */}
             <div>
               <label htmlFor="patient-phone" className="mb-2 block text-sm font-medium text-slate-200">
                 Phone number <span className="text-red-400">*</span>
@@ -1100,6 +1249,27 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
               <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-400">
                 <span className="w-2 h-2 rounded-full bg-[#25D366] flex-shrink-0" />
                 We may use this number to contact you with updates.
+              </p>
+            </div>
+
+            {/* Emergency contact phone */}
+            <div>
+              <label htmlFor="emergency-phone" className="mb-2 block text-sm font-medium text-slate-200">
+                Emergency contact phone
+              </label>
+              <div className="relative">
+                <User size={15} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-500" />
+                <input
+                  id="emergency-phone"
+                  type="tel"
+                  value={emergencyPhone}
+                  onChange={(e) => setEmergencyPhone(e.target.value)}
+                  placeholder="+234..."
+                  className="h-[50px] w-full rounded-lg border border-white/[0.08] bg-white/[0.04] pl-10 pr-4 text-sm text-white placeholder:text-slate-500 focus:border-sky-500/60 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
+                />
+              </div>
+              <p className="mt-2 text-xs text-slate-400">
+                We can send key updates here too if the person is not able to answer.
               </p>
             </div>
 
@@ -1165,7 +1335,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
               )}
               <p className="mb-3 text-xs font-medium uppercase tracking-wider text-slate-400">Booking code</p>
               <div className="flex items-center justify-center gap-3">
-                <span className="text-4xl font-mono font-bold tracking-[0.2em] text-white">
+                <span className="text-[1.75rem] font-mono font-bold tracking-[0.16em] text-white sm:text-4xl sm:tracking-[0.2em]">
                   {transferCode}
                 </span>
                 <button
@@ -1184,6 +1354,38 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
               </p>
             </div>
           )}
+
+          {/* Request details card */}
+          <div className="mb-4 rounded-xl border border-white/[0.08] bg-white/[0.04] p-4">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Request details</p>
+            <div className="mt-3 space-y-2.5">
+              <div className="flex items-start gap-3">
+                <Phone size={14} className="mt-0.5 text-sky-400" />
+                <div className="min-w-0">
+                  <p className="text-[11px] uppercase tracking-wider text-slate-500">Phone</p>
+                  <p className="text-sm text-slate-100">{requestPhone || 'Not shared'}</p>
+                </div>
+              </div>
+              {requestEmergencyPhone && (
+                <div className="flex items-start gap-3">
+                  <User size={14} className="mt-0.5 text-sky-400" />
+                  <div className="min-w-0">
+                    <p className="text-[11px] uppercase tracking-wider text-slate-500">Emergency contact</p>
+                    <p className="text-sm text-slate-100">{requestEmergencyPhone}</p>
+                  </div>
+                </div>
+              )}
+              {requestSummary && (
+                <div className="flex items-start gap-3">
+                  <FileText size={14} className="mt-0.5 text-sky-400" />
+                  <div className="min-w-0">
+                    <p className="text-[11px] uppercase tracking-wider text-slate-500">Notes</p>
+                    <p className="text-sm leading-relaxed text-slate-100">{requestSummary}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* Hospital contact card */}
           {selectedResult && (
@@ -1211,7 +1413,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
               <div className="flex items-center gap-4">
                 <div className="flex-1">
                   <p className="text-[11px] font-medium uppercase tracking-wider text-amber-300">Spot held for</p>
-                  <p className="mt-0.5 text-3xl font-mono font-bold tabular-nums text-amber-300">
+                  <p className="mt-0.5 text-[2rem] font-mono font-bold tabular-nums text-amber-300 sm:text-3xl">
                     {Math.floor(countdown / 60)}:{String(countdown % 60).padStart(2, '0')}
                   </p>
                 </div>
@@ -1250,7 +1452,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
                   </div>
                 </div>
 
-                <h3 className="mb-2 text-xl font-bold text-white">Arrival confirmed</h3>
+                <h3 className="mb-2 text-[1.1rem] font-bold text-white sm:text-xl">Arrival confirmed</h3>
                 <p className="mb-5 text-sm leading-relaxed text-slate-400">
                   You have been checked in at<br />
                   <span className="font-semibold text-white">{selectedResult?.name || 'the hospital'}</span>
@@ -1258,7 +1460,7 @@ export default function SearchPanel({ onResults, onClear, searchResults, hospita
 
                 <div className="mb-5 inline-block rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-5 py-4">
                   <p className="mb-1 text-[10px] uppercase tracking-widest text-emerald-300">Booking code</p>
-                  <p className="text-2xl font-mono font-bold tracking-[0.2em] text-emerald-300">{transferCode}</p>
+                  <p className="text-[1.45rem] font-mono font-bold tracking-[0.16em] text-emerald-300 sm:text-2xl sm:tracking-[0.2em]">{transferCode}</p>
                 </div>
 
                 <p className="mb-6 text-xs leading-relaxed text-slate-400">

@@ -8,12 +8,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
-  ArrowLeft, Ambulance, Plus, RefreshCw, X, Loader2,
+  Ambulance, Plus, RefreshCw, X, Loader2,
   AlertTriangle, User, MapPin, Clock3, ChevronDown, Wrench,
   Building2, Activity, Phone, ShieldAlert, Navigation, CircleDot,
-  CheckCircle2, Truck
+  CheckCircle2, Truck, LogOut, Lock
 } from 'lucide-react';
 import api from '../lib/api';
+import HistoryNav from '../components/HistoryNav';
 
 const STATUS_CONFIG = {
   available: { label: 'Available', badge: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -46,6 +47,8 @@ const ASSIGNMENT_STAGES = [
   { id: 'delivered', label: 'Delivered', icon: CheckCircle2 },
 ];
 
+const DASHBOARD_POLL_MS = 20000;
+
 function timeSince(iso) {
   if (!iso) return '—';
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
@@ -65,6 +68,10 @@ function formatClock(date = new Date()) {
 
 export default function DispatchDashboard() {
   const { slug } = useParams();
+  const [pinVerified, setPinVerified] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState(null);
+  const [pinLoading, setPinLoading] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -75,31 +82,36 @@ export default function DispatchDashboard() {
   const [now, setNow] = useState(new Date());
   const intervalRef = useRef(null);
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await api.get(`/api/dispatch/${slug}`);
-      setData(res.data);
-      setLastRefresh(new Date());
-      setError(null);
-
-      try {
-        const trRes = await api.get('/api/transport/dispatch/pending');
-        setPendingTransports(trRes.data.pending || []);
-      } catch {
-        setPendingTransports([]);
-      }
-    } catch {
-      setError('Failed to load dispatch data.');
-    } finally {
-      setLoading(false);
+  // Check if PIN is already verified in sessionStorage
+  useEffect(() => {
+    const saved = sessionStorage.getItem(`dispatch_pin_${slug}`);
+    if (saved === 'verified') {
+      setPinVerified(true);
     }
   }, [slug]);
 
+  const fetchData = useCallback(async () => {
+    if (!pinVerified) return;
+    try {
+      const res = await api.get(`/api/dispatch/${slug}`);
+      setData(res.data);
+      setPendingTransports(res.data.pending_transports || []);
+      setLastRefresh(new Date());
+      setError(null);
+    } catch {
+      setError('Failed to load dispatch data.');
+      setPendingTransports([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [slug, pinVerified]);
+
   useEffect(() => {
+    if (!pinVerified) return;
     fetchData();
-    intervalRef.current = setInterval(fetchData, 10000);
+    intervalRef.current = setInterval(fetchData, DASHBOARD_POLL_MS);
     return () => clearInterval(intervalRef.current);
-  }, [fetchData]);
+  }, [fetchData, pinVerified]);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
@@ -144,6 +156,72 @@ export default function DispatchDashboard() {
     }
   }
 
+  async function handleVerifyPin(e) {
+    e.preventDefault();
+    setPinLoading(true);
+    setPinError(null);
+    try {
+      await api.post(`/api/dispatch/${slug}/verify-pin`, { pin: pinInput });
+      sessionStorage.setItem(`dispatch_pin_${slug}`, 'verified');
+      setPinVerified(true);
+    } catch (err) {
+      setPinError(err.response?.data?.detail || 'Incorrect PIN');
+    } finally {
+      setPinLoading(false);
+    }
+  }
+
+  function handleLogout() {
+    sessionStorage.removeItem(`dispatch_pin_${slug}`);
+    setPinVerified(false);
+    setPinInput('');
+    setData(null);
+  }
+
+  // ── PIN gate ────────────────────────────────────────
+  if (!pinVerified) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#eef2f7] p-6">
+        <div className="w-full max-w-sm rounded-[28px] border border-slate-200 bg-white p-8 shadow-sm text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-sky-50">
+            <Lock size={24} className="text-sky-600" />
+          </div>
+          <h1 className="text-lg font-semibold text-slate-900">Dispatch Access</h1>
+          <p className="mt-1 text-sm text-slate-500">Enter your company PIN to continue</p>
+
+          {pinError && (
+            <div className="mt-4 rounded-lg bg-red-50 border border-red-100 px-3 py-2 text-sm text-red-600">
+              {pinError}
+            </div>
+          )}
+
+          <form onSubmit={handleVerifyPin} className="mt-5">
+            <input
+              type="password"
+              value={pinInput}
+              onChange={e => setPinInput(e.target.value)}
+              placeholder="Enter PIN"
+              autoFocus
+              required
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-center text-2xl font-mono tracking-[0.3em] text-slate-900 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            />
+            <button
+              type="submit"
+              disabled={pinLoading || !pinInput.trim()}
+              className="mt-4 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-slate-900 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:bg-slate-300"
+            >
+              {pinLoading ? <Loader2 size={16} className="animate-spin" /> : 'Verify'}
+            </button>
+          </form>
+
+          <Link to="/" className="mt-4 inline-block text-xs text-slate-400 hover:text-slate-600">
+            Back to map
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#eef2f7]">
@@ -185,6 +263,7 @@ export default function DispatchDashboard() {
               now={now}
               slug={slug}
               onAdd={() => setShowAddForm(true)}
+              onLogout={handleLogout}
             />
 
             <div className="mt-4 space-y-4">
@@ -209,7 +288,7 @@ export default function DispatchDashboard() {
                       icon={Activity}
                       label="Refresh"
                       value={lastRefresh ? timeSince(lastRefresh.toISOString()) : '—'}
-                      sub="Updates every 10 seconds"
+                      sub="Updates every 20 seconds"
                     />
                   </div>
                 </div>
@@ -316,13 +395,11 @@ export default function DispatchDashboard() {
   );
 }
 
-function TopBar({ company, now, slug, onAdd }) {
+function TopBar({ company, now, slug, onAdd, onLogout }) {
   return (
     <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
       <div className="flex flex-wrap items-center gap-3">
-        <Link to="/" className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
-          <ArrowLeft size={16} />
-        </Link>
+        <HistoryNav backFallback="/" />
         <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
           <CircleDot size={12} className="text-sky-400" />
           Dispatch
@@ -352,6 +429,13 @@ function TopBar({ company, now, slug, onAdd }) {
           <p className="font-medium text-slate-300">{company.name}</p>
           <p className="mt-0.5 font-mono">{formatClock(now)}</p>
         </div>
+        <button
+          onClick={onLogout}
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-white/[0.06] text-slate-400 transition hover:bg-red-500/15 hover:text-red-400"
+          title="Log out"
+        >
+          <LogOut size={15} />
+        </button>
       </div>
     </div>
   );
@@ -520,9 +604,27 @@ function TransportRequestCard({ request, ambulances, loading, onAssign }) {
 
 function AssignmentCard({ assignment }) {
   const status = STATUS_CONFIG[assignment.status] || STATUS_CONFIG.dispatched;
-  const timeline = assignment._timeline || [];
+  const [open, setOpen] = useState(false);
+  const [timeline, setTimeline] = useState([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   const completedStatuses = new Set(timeline.map((item) => item.status));
   const currentIdx = ASSIGNMENT_STAGES.findIndex((stage) => stage.id === assignment.status);
+
+  async function handleToggleOpen() {
+    const nextOpen = !open;
+    setOpen(nextOpen);
+    if (!nextOpen || timeline.length > 0 || timelineLoading) return;
+
+    setTimelineLoading(true);
+    try {
+      const res = await api.get(`/api/dispatch/assignments/${assignment.id}/track`);
+      setTimeline(res.data.timeline || []);
+    } catch (err) {
+      console.error('Assignment timeline failed:', err);
+    } finally {
+      setTimelineLoading(false);
+    }
+  }
 
   return (
     <div className="rounded-[24px] border border-slate-100 bg-white px-5 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)]">
@@ -560,33 +662,46 @@ function AssignmentCard({ assignment }) {
             ) : null}
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            {ASSIGNMENT_STAGES.map((stage, index) => {
-              const Icon = stage.icon;
-              const isDone = index <= currentIdx || completedStatuses.has(stage.id);
-              const isCurrent = stage.id === assignment.status;
-              const timeEntry = timeline.find((item) => item.status === stage.id);
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={handleToggleOpen}
+              className="inline-flex min-h-[38px] items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-600 transition hover:bg-slate-100"
+            >
+              {timelineLoading ? <Loader2 size={12} className="animate-spin" /> : <ChevronDown size={12} className={open ? 'rotate-180 transition-transform' : 'transition-transform'} />}
+              {open ? 'Hide timeline' : 'View timeline'}
+            </button>
 
-              return (
-                <div key={stage.id} className="flex items-center gap-2">
-                  <div
-                    className={`flex h-9 w-9 items-center justify-center rounded-full border ${
-                      isDone ? 'border-emerald-100 bg-emerald-50 text-emerald-600' : 'border-slate-200 bg-slate-50 text-slate-400'
-                    } ${isCurrent ? 'ring-2 ring-emerald-100' : ''}`}
-                  >
-                    <Icon size={16} />
-                  </div>
-                  <div>
-                    <p className={`text-xs font-medium ${isDone ? 'text-slate-700' : 'text-slate-400'}`}>{stage.label}</p>
-                    {timeEntry ? (
-                      <p className="text-[11px] text-slate-400">
-                        {new Date(timeEntry.created_at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })}
-                      </p>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
+            {open ? (
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                {ASSIGNMENT_STAGES.map((stage, index) => {
+                  const Icon = stage.icon;
+                  const isDone = index <= currentIdx || completedStatuses.has(stage.id);
+                  const isCurrent = stage.id === assignment.status;
+                  const timeEntry = timeline.find((item) => item.status === stage.id);
+
+                  return (
+                    <div key={stage.id} className="flex items-center gap-2">
+                      <div
+                        className={`flex h-9 w-9 items-center justify-center rounded-full border ${
+                          isDone ? 'border-emerald-100 bg-emerald-50 text-emerald-600' : 'border-slate-200 bg-slate-50 text-slate-400'
+                        } ${isCurrent ? 'ring-2 ring-emerald-100' : ''}`}
+                      >
+                        <Icon size={16} />
+                      </div>
+                      <div>
+                        <p className={`text-xs font-medium ${isDone ? 'text-slate-700' : 'text-slate-400'}`}>{stage.label}</p>
+                        {timeEntry ? (
+                          <p className="text-[11px] text-slate-400">
+                            {new Date(timeEntry.created_at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
         </div>
 

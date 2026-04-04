@@ -16,11 +16,15 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
-from app.database import supabase
+from app.database import supabase, execute_async
 from app.config import settings
+from app.routers.transport import fetch_dispatch_pending_transports
+from app.services.dashboard_cache import get_summary, set_summary, invalidate_summary
 from app.services.whatsapp import send_text
 
 router = APIRouter(prefix="/dispatch", tags=["Dispatch"])
+
+DISPATCH_DASHBOARD_CACHE_TTL_SEC = 10.0
 
 
 async def _send_text_background(phone: str, message: str):
@@ -28,6 +32,19 @@ async def _send_text_background(phone: str, message: str):
         await send_text(phone, message)
     except Exception as exc:
         print(f"   ⚠️ Background send_text failed: {exc}")
+
+
+def _extract_emergency_phone(handshake: dict | None) -> str | None:
+    if not handshake or not isinstance(handshake.get("parsed_requirements"), dict):
+        return None
+    phone = (handshake["parsed_requirements"].get("emergency_contact_phone") or "").strip()
+    return phone or None
+
+
+def _build_emergency_track_link(handshake_id: str | None) -> str | None:
+    if not handshake_id:
+        return None
+    return f"{settings.FRONTEND_URL}/emergency/{handshake_id}/track"
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +82,10 @@ class StatusUpdate(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_company_by_slug(slug: str) -> dict:
-    result = supabase.table("dispatch_companies").select("*").eq("slug", slug).eq("is_active", True).execute()
+async def get_company_by_slug(slug: str) -> dict:
+    result = await execute_async(
+        supabase.table("dispatch_companies").select("*").eq("slug", slug).eq("is_active", True)
+    )
     if not result.data:
         raise HTTPException(status_code=404, detail="Dispatch company not found")
     return result.data[0]
@@ -112,8 +131,34 @@ def _broadcast_status_from_assignment(status: str) -> str | None:
 
 @router.get("")
 async def list_companies():
-    result = supabase.table("dispatch_companies").select("*").eq("is_active", True).order("name").execute()
+    result = await execute_async(supabase.table("dispatch_companies").select("*").eq("is_active", True).order("name"))
     return {"companies": result.data or []}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/dispatch/{slug}/verify-pin — PIN-based access
+# ---------------------------------------------------------------------------
+
+class PinRequest(BaseModel):
+    pin: str
+
+@router.post("/{slug}/verify-pin")
+async def verify_pin(slug: str, request: PinRequest):
+    """Verify a dispatch company's access PIN."""
+    result = await execute_async(
+        supabase.table("dispatch_companies")
+        .select("id, name, slug, access_pin")
+        .eq("slug", slug)
+        .eq("is_active", True)
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Dispatch company not found")
+
+    company = result.data[0]
+    if company.get("access_pin") != request.pin:
+        raise HTTPException(status_code=401, detail="Incorrect PIN")
+
+    return {"verified": True, "company": company["name"], "slug": company["slug"]}
 
 
 # ---------------------------------------------------------------------------
@@ -122,15 +167,20 @@ async def list_companies():
 
 @router.get("/{slug}")
 async def get_company_dashboard(slug: str):
-    company = get_company_by_slug(slug)
+    company = await get_company_by_slug(slug)
+    cached_dashboard = get_summary("dispatch_dashboard", company["id"])
+    if cached_dashboard is not None:
+        return cached_dashboard
+    pending_transports = await fetch_dispatch_pending_transports()
 
     # All ambulances
     ambulances = (
+        await execute_async(
         supabase.table("ambulances")
         .select("*")
         .eq("company_id", company["id"])
         .order("vehicle_id")
-        .execute()
+        )
     ).data or []
 
     # Active assignments for this company's ambulances
@@ -138,11 +188,12 @@ async def get_company_dashboard(slug: str):
     assignments = []
     if amb_ids:
         all_assignments = (
+            await execute_async(
             supabase.table("ambulance_assignments")
             .select("*")
             .in_("ambulance_id", amb_ids)
             .order("assigned_at", desc=True)
-            .execute()
+            )
         ).data or []
 
         hospital_ids = list({a["destination_hospital_id"] for a in all_assignments if a.get("destination_hospital_id")})
@@ -153,43 +204,35 @@ async def get_company_dashboard(slug: str):
         hospital_map = {}
         if hospital_ids:
             hospitals = (
+                await execute_async(
                 supabase.table("hospitals")
                 .select("id, name, slug, address")
                 .in_("id", hospital_ids)
-                .execute()
+                )
             ).data or []
             hospital_map = _rows_by_id(hospitals)
 
         patient_map = {}
         if patient_ids:
             patients = (
+                await execute_async(
                 supabase.table("broadcast_patients")
                 .select("id, tag_number, severity, condition_notes")
                 .in_("id", patient_ids)
-                .execute()
+                )
             ).data or []
             patient_map = _rows_by_id(patients)
 
         handshake_map = {}
         if handshake_ids:
             handshakes = (
+                await execute_async(
                 supabase.table("handshakes")
                 .select("id, transfer_code")
                 .in_("id", handshake_ids)
-                .execute()
+                )
             ).data or []
             handshake_map = _rows_by_id(handshakes)
-
-        timeline_map = {}
-        if assignment_ids:
-            updates = (
-                supabase.table("ambulance_status_updates")
-                .select("assignment_id, status, note, created_at")
-                .in_("assignment_id", assignment_ids)
-                .order("created_at")
-                .execute()
-            ).data or []
-            timeline_map = _group_updates_by_assignment(updates)
 
         ambulance_map = _rows_by_id(ambulances)
 
@@ -202,7 +245,6 @@ async def get_company_dashboard(slug: str):
 
             handshake = handshake_map.get(a.get("handshake_id"))
             a["_transfer_code"] = handshake.get("transfer_code") if handshake else None
-            a["_timeline"] = timeline_map.get(a.get("id"), [])
 
         assignments = all_assignments
 
@@ -215,12 +257,14 @@ async def get_company_dashboard(slug: str):
         "active_assignments": sum(1 for a in assignments if a["status"] not in ("delivered", "cancelled")),
     }
 
-    return {
+    response = {
         "company": company,
         "ambulances": ambulances,
         "assignments": assignments,
+        "pending_transports": pending_transports,
         "stats": stats,
     }
+    return set_summary("dispatch_dashboard", company["id"], response, DISPATCH_DASHBOARD_CACHE_TTL_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +273,8 @@ async def get_company_dashboard(slug: str):
 
 @router.post("/{slug}/ambulances")
 async def add_ambulance(slug: str, request: AmbulanceCreate):
-    company = get_company_by_slug(slug)
+    company = await get_company_by_slug(slug)
+    invalidate_summary("dispatch_dashboard", company["id"])
 
     result = supabase.table("ambulances").insert({
         "company_id": company["id"],
@@ -250,9 +295,10 @@ async def add_ambulance(slug: str, request: AmbulanceCreate):
 
 @router.patch("/ambulances/{ambulance_id}")
 async def update_ambulance(ambulance_id: str, request: AmbulanceUpdate):
-    amb = supabase.table("ambulances").select("id").eq("id", ambulance_id).execute()
+    amb = supabase.table("ambulances").select("id, company_id").eq("id", ambulance_id).execute()
     if not amb.data:
         raise HTTPException(status_code=404, detail="Ambulance not found")
+    invalidate_summary("dispatch_dashboard", amb.data[0]["company_id"])
 
     update = {"updated_at": datetime.now(timezone.utc).isoformat()}
     if request.status is not None:
@@ -278,9 +324,10 @@ async def update_ambulance(ambulance_id: str, request: AmbulanceUpdate):
 
 @router.delete("/ambulances/{ambulance_id}")
 async def delete_ambulance(ambulance_id: str):
-    amb = supabase.table("ambulances").select("id").eq("id", ambulance_id).execute()
+    amb = supabase.table("ambulances").select("id, company_id").eq("id", ambulance_id).execute()
     if not amb.data:
         raise HTTPException(status_code=404, detail="Ambulance not found")
+    invalidate_summary("dispatch_dashboard", amb.data[0]["company_id"])
 
     supabase.table("ambulances").delete().eq("id", ambulance_id).execute()
     return {"deleted": True}
@@ -297,6 +344,7 @@ async def assign_ambulance(ambulance_id: str, request: AssignAmbulance):
         raise HTTPException(status_code=404, detail="Ambulance not found")
 
     ambulance = amb.data[0]
+    invalidate_summary("dispatch_dashboard", ambulance["company_id"])
     if ambulance["status"] != "available":
         raise HTTPException(status_code=400, detail=f"Ambulance is not available (current status: {ambulance['status']})")
 
@@ -402,6 +450,10 @@ async def update_assignment_status(assignment_id: str, request: StatusUpdate, ba
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     assignment = a.data[0]
+    if assignment.get("ambulances", {}).get("id"):
+        ambulance_row = supabase.table("ambulances").select("company_id").eq("id", assignment["ambulances"]["id"]).execute()
+        if ambulance_row.data:
+            invalidate_summary("dispatch_dashboard", ambulance_row.data[0]["company_id"])
 
     if request.status not in VALID_ASSIGNMENT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {VALID_ASSIGNMENT_STATUSES}")
@@ -445,10 +497,12 @@ async def update_assignment_status(assignment_id: str, request: StatusUpdate, ba
 
     # Notify patient via WhatsApp for key milestones
     patient_phone = None
+    emergency_phone = None
     if assignment.get("handshake_id"):
-        hs = supabase.table("handshakes").select("requesting_party_phone").eq("id", assignment["handshake_id"]).execute()
+        hs = supabase.table("handshakes").select("requesting_party_phone, parsed_requirements").eq("id", assignment["handshake_id"]).execute()
         if hs.data:
             patient_phone = hs.data[0].get("requesting_party_phone")
+            emergency_phone = _extract_emergency_phone(hs.data[0])
 
     STATUS_MESSAGES = {
         "dispatched": "🚑 An ambulance has been dispatched to pick you up.",
@@ -458,13 +512,18 @@ async def update_assignment_status(assignment_id: str, request: StatusUpdate, ba
         "delivered": "✅ You've arrived at the hospital. Wishing a speedy recovery.",
     }
 
-    if patient_phone and request.status in STATUS_MESSAGES:
+    if request.status in STATUS_MESSAGES:
         ambulance_info = assignment.get("ambulances", {})
         vehicle = ambulance_info.get("vehicle_id", "")
         msg = STATUS_MESSAGES[request.status]
         if vehicle:
             msg = f"{msg}\nAmbulance: *{vehicle}*"
-        background_tasks.add_task(_send_text_background, patient_phone, msg)
+        track_link = _build_emergency_track_link(assignment.get("handshake_id"))
+        if track_link:
+            msg = f"{msg}\n\nTrack updates:\n{track_link}"
+        for phone in [patient_phone, emergency_phone]:
+            if phone:
+                background_tasks.add_task(_send_text_background, phone, msg)
 
     print(f"   🚑 STATUS UPDATE: {assignment_id[:8]} → {request.status}")
 

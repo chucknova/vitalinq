@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, RefreshCw, Plus, Minus, Check, Loader2,
+  RefreshCw, Plus, Minus, Check, Loader2,
   BedDouble, AlertTriangle, X, Zap, ChevronDown, Activity,
   ClipboardList, Ambulance, Clock3, ShieldAlert, Building2,
-  Search, Filter, TrendingUp, CircleDot, CheckCircle2, MapPinned,
-  Stethoscope, ChevronRight
+  Search, Filter, TrendingUp, CircleDot, CheckCircle2, MapPinned, Phone,
+  Stethoscope, ChevronRight, LogOut
 } from 'lucide-react';
 import api from '../lib/api';
+import { useAuth } from '../hooks/useAuth';
+import HistoryNav from '../components/HistoryNav';
 
 const BED_LABELS = {
   icu: 'ICU',
@@ -51,6 +53,8 @@ const URGENCY_META = {
   low: { label: 'Low', className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
 };
 
+const DASHBOARD_POLL_MS = 20000;
+
 const STATUS_META = {
   accepted: { label: 'Held', className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
   requested: { label: 'Incoming', className: 'bg-amber-50 text-amber-700 border-amber-100' },
@@ -85,15 +89,17 @@ function toneClass(tone) {
 
 export default function HospitalDashboard() {
   const { slug } = useParams();
+  const navigate = useNavigate();
+  const { logout } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [actionLoading, setActionLoading] = useState({});
   const [sortBy, setSortBy] = useState('time');
   const [searchQuery, setSearchQuery] = useState('');
-  const [transportRequests, setTransportRequests] = useState([]);
   const [bedDrafts, setBedDrafts] = useState({});
   const [broadcastImages, setBroadcastImages] = useState(null);
+  const [highlightedRequestId, setHighlightedRequestId] = useState(null);
   const intervalRef = useRef(null);
 
   const URGENCY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
@@ -110,30 +116,24 @@ export default function HospitalDashboard() {
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const visibleHandshakes = normalizedSearch
     ? sortedHandshakes.filter((hs) => {
+        const transport = hs._transport_request || {};
         const haystacks = [
-          hs.patient_name,
           hs.transfer_code,
+          hs.requesting_party_phone,
+          hs.parsed_requirements?.contact_phone,
+          hs.parsed_requirements?.emergency_contact_phone,
           hs.parsed_requirements?.summary,
           hs.parsed_requirements?.urgency,
           hs.parsed_requirements?.bed_type,
           hs.parsed_requirements?.notes,
+          transport.pickup_address,
+          transport.status,
+          transport.patient_phone,
+          transport.crew_phone,
         ];
         return haystacks.some((value) => String(value || '').toLowerCase().includes(normalizedSearch));
       })
     : sortedHandshakes;
-  const visibleTransportRequests = normalizedSearch
-    ? transportRequests.filter((tr) => {
-        const haystacks = [
-          tr.patient_name,
-          tr.transfer_code,
-          tr.pickup_address,
-          tr.pickup_label,
-          tr.notes,
-          tr.status,
-        ];
-        return haystacks.some((value) => String(value || '').toLowerCase().includes(normalizedSearch));
-      })
-    : transportRequests;
 
   const fetchDashboard = useCallback(async () => {
     try {
@@ -143,16 +143,6 @@ export default function HospitalDashboard() {
         Object.fromEntries((res.data?.beds || []).map((bed) => [bed.bed_type, String(bed.available_count ?? 0)]))
       );
       setError(null);
-
-      try {
-        const hospitalId = res.data?.hospital?.id;
-        if (hospitalId) {
-          const trRes = await api.get(`/api/transport/hospital/${hospitalId}/pending`);
-          setTransportRequests(trRes.data.pending || []);
-        }
-      } catch {
-        // Keep page usable if transport requests fail.
-      }
     } catch (err) {
       if (err.response?.status === 404) setError('Hospital not found. Check the URL.');
       else setError('Failed to load dashboard.');
@@ -163,7 +153,7 @@ export default function HospitalDashboard() {
 
   useEffect(() => {
     fetchDashboard();
-    intervalRef.current = setInterval(fetchDashboard, 10000);
+    intervalRef.current = setInterval(fetchDashboard, DASHBOARD_POLL_MS);
     return () => clearInterval(intervalRef.current);
   }, [fetchDashboard]);
 
@@ -344,10 +334,12 @@ export default function HospitalDashboard() {
     }
   }
 
-  async function handleComplete(handshakeId) {
+  async function handleComplete(handshakeId, transferCode) {
     setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: 'complete' }));
     try {
-      await api.post(`/api/hospitals/dashboard/${slug}/complete/${handshakeId}`);
+      await api.post(`/api/hospitals/dashboard/${slug}/complete/${handshakeId}`, {
+        transfer_code: transferCode,
+      });
       setData((prev) => ({
         ...prev,
         active_handshakes: prev.active_handshakes.filter((hs) => hs.id !== handshakeId),
@@ -355,16 +347,26 @@ export default function HospitalDashboard() {
       refreshDashboardSoon();
     } catch (err) {
       console.error('Complete failed:', err);
+      if (err.response?.data?.detail === 'Incorrect transfer code') {
+        alert('Incorrect transfer code. Please ask the patient to confirm their code.');
+      }
     } finally {
       setActionLoading((prev) => ({ ...prev, [`hs_${handshakeId}`]: null }));
     }
   }
 
   async function handleTransportAccept(transportId) {
-    setActionLoading((prev) => ({ ...prev, [`tr_${transportId}`]: 'accept' }));
+    setActionLoading((prev) => ({ ...prev, [`tr_${transportId}`]: 'transport_accept' }));
     try {
       await api.post(`/api/transport/${transportId}/hospital-respond`, { accepted: true });
-      setTransportRequests((prev) => prev.filter((transport) => transport.id !== transportId));
+      setData((prev) => ({
+        ...prev,
+        active_handshakes: prev.active_handshakes.map((hs) =>
+          hs._transport_request?.id === transportId
+            ? { ...hs, _transport_request: { ...hs._transport_request, status: 'hospital_accepted' }, _transport_needs_response: false }
+            : hs
+        ),
+      }));
       refreshDashboardSoon();
     } catch (err) {
       console.error('Transport accept failed:', err);
@@ -374,10 +376,17 @@ export default function HospitalDashboard() {
   }
 
   async function handleTransportDecline(transportId) {
-    setActionLoading((prev) => ({ ...prev, [`tr_${transportId}`]: 'decline' }));
+    setActionLoading((prev) => ({ ...prev, [`tr_${transportId}`]: 'transport_decline' }));
     try {
       await api.post(`/api/transport/${transportId}/hospital-respond`, { accepted: false });
-      setTransportRequests((prev) => prev.filter((transport) => transport.id !== transportId));
+      setData((prev) => ({
+        ...prev,
+        active_handshakes: prev.active_handshakes.map((hs) =>
+          hs._transport_request?.id === transportId
+            ? { ...hs, _transport_request: { ...hs._transport_request, status: 'asking_dispatch' }, _transport_needs_response: false }
+            : hs
+        ),
+      }));
       refreshDashboardSoon();
     } catch (err) {
       console.error('Transport decline failed:', err);
@@ -400,6 +409,17 @@ export default function HospitalDashboard() {
     } finally {
       setActionLoading((prev) => ({ ...prev, [`bc_${broadcastId}`]: null }));
     }
+  }
+
+  function focusIncomingRequest(handshakeId) {
+    setHighlightedRequestId(handshakeId);
+    requestAnimationFrame(() => {
+      const node = document.getElementById(`request-${handshakeId}`);
+      if (node) {
+        node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+    window.setTimeout(() => setHighlightedRequestId((current) => (current === handshakeId ? null : current)), 2200);
   }
 
   if (loading) {
@@ -427,24 +447,38 @@ export default function HospitalDashboard() {
     );
   }
 
-  const { hospital, beds, active_handshakes, pending_broadcasts = [], broadcast_history = [], stats } = data;
+  const { hospital, beds, active_handshakes, pending_broadcasts = [], transport_needed_count = 0, stats } = data;
   const totalOpenBeds = beds.reduce((sum, bed) => sum + (bed.available_count || 0), 0);
   const totalBeds = beds.reduce((sum, bed) => sum + (bed.total_count || 0), 0);
   const heldCount = active_handshakes.filter((hs) => hs.status === 'accepted').length;
   const waitingCount = active_handshakes.filter((hs) => hs.status !== 'accepted').length;
+  const transportTarget = active_handshakes.find((hs) => hs._transport_needs_response);
   const alertItems = [
     pending_broadcasts.length > 0 ? {
       key: 'broadcasts',
       title: `${pending_broadcasts.length} broadcast alert${pending_broadcasts.length > 1 ? 's' : ''} waiting`,
       detail: 'Mass-casualty alerts need a response.',
-      href: '#broadcast-alerts',
+      action: () => {
+        document.getElementById('broadcast-alerts')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      },
       tone: 'amber',
+    } : null,
+    transport_needed_count > 0 ? {
+      key: 'transport',
+      title: `${transport_needed_count} request${transport_needed_count > 1 ? 's' : ''} need transport`,
+      detail: 'Jump to the incoming case and respond there.',
+      action: () => {
+        if (transportTarget) focusIncomingRequest(transportTarget.id);
+      },
+      tone: 'violet',
     } : null,
     waitingCount > 0 ? {
       key: 'requests',
       title: `${waitingCount} incoming request${waitingCount > 1 ? 's' : ''} waiting`,
       detail: 'Individual patient requests need a decision.',
-      href: '#incoming-patients',
+      action: () => {
+        document.getElementById('incoming-patients')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      },
       tone: 'sky',
     } : null,
   ].filter(Boolean);
@@ -459,9 +493,54 @@ export default function HospitalDashboard() {
               slug={slug}
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
+              onLogout={() => { logout(); navigate('/login'); }}
             />
 
             <div className="mt-4 space-y-4">
+              {/* Transfer code match — show confirmation when search matches a code */}
+              {(() => {
+                const codeQuery = searchQuery.trim().toUpperCase();
+                if (codeQuery.length < 4) return null;
+                const match = sortedHandshakes.find(
+                  hs => hs.transfer_code === codeQuery && hs.status === 'accepted'
+                );
+                if (!match) return null;
+                const urgency = match.parsed_requirements?.urgency || 'medium';
+                return (
+                  <section className="rounded-[20px] border-2 border-emerald-200 bg-emerald-50 p-5 animate-in">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-widest text-emerald-600">Transfer code matched</p>
+                        <p className="mt-2 font-mono text-2xl font-bold tracking-[0.15em] text-slate-900">{match.transfer_code}</p>
+                        <p className="mt-2 text-sm text-slate-700">{match.patient_summary || 'Patient'}</p>
+                        <div className="mt-2 flex items-center gap-2">
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
+                            urgency === 'critical' ? 'bg-red-100 text-red-600' :
+                            urgency === 'high' ? 'bg-amber-100 text-amber-600' :
+                            'bg-sky-100 text-sky-600'
+                          }`}>{urgency}</span>
+                          <span className="text-xs text-slate-500">{match.bed_type?.replace(/_/g, ' ')}</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          handleComplete(match.id, codeQuery);
+                          setSearchQuery('');
+                        }}
+                        disabled={actionLoading[`hs_${match.id}`]}
+                        className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                      >
+                        {actionLoading[`hs_${match.id}`] === 'complete'
+                          ? <Loader2 size={16} className="animate-spin" />
+                          : <CheckCircle2 size={16} />
+                        }
+                        Confirm arrival
+                      </button>
+                    </div>
+                  </section>
+                );
+              })()}
+
               {alertItems.length > 0 ? <AlertBanner items={alertItems} /> : null}
 
               <div className="grid gap-4 xl:grid-cols-[1.45fr,1fr]">
@@ -498,7 +577,7 @@ export default function HospitalDashboard() {
                       <MetricCard icon={BedDouble} label="Open Beds" value={totalOpenBeds} sub={`of ${totalBeds || 0} total`} tone="emerald" />
                       <MetricCard icon={ClipboardList} label="Waiting" value={waitingCount} sub="Need a response" tone="amber" />
                       <MetricCard icon={CheckCircle2} label="Held Beds" value={heldCount} sub="Currently reserved" tone="sky" />
-                      <MetricCard icon={Ambulance} label="Transport" value={transportRequests.length || 0} sub="Open pickups" tone="violet" />
+                      <MetricCard icon={Ambulance} label="Transport" value={transport_needed_count || 0} sub="Need hospital response" tone="violet" />
                       <MetricCard icon={Zap} label="Broadcasts" value={pending_broadcasts.length || 0} sub="Need a response" tone="amber" />
                     </div>
                   </section>
@@ -643,6 +722,7 @@ export default function HospitalDashboard() {
                     {visibleHandshakes.map((hs) => (
                       <PatientRequestCard
                         key={hs.id}
+                        highlighted={highlightedRequestId === hs.id}
                         hs={hs}
                         hospital={hospital}
                         loading={actionLoading[`hs_${hs.id}`]}
@@ -650,37 +730,13 @@ export default function HospitalDashboard() {
                         onDecline={handleDecline}
                         onOverride={handleOverride}
                         onComplete={handleComplete}
+                        onTransportAccept={handleTransportAccept}
+                        onTransportDecline={handleTransportDecline}
                       />
                     ))}
                   </div>
                 )}
               </section>
-
-              {visibleTransportRequests.length > 0 && (
-                <aside className="rounded-[28px] bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.06)]">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-semibold text-slate-900">Transport requests</p>
-                        <p className="mt-1 text-xs text-slate-500">Incoming ambulance pickup needs.</p>
-                      </div>
-                      <span className="rounded-full bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-600">
-                        {visibleTransportRequests.length}
-                      </span>
-                    </div>
-
-                    <div className="mt-4 space-y-3">
-                      {visibleTransportRequests.map((tr) => (
-                        <TransportCard
-                          key={tr.id}
-                          tr={tr}
-                          loading={actionLoading[`tr_${tr.id}`]}
-                          onAccept={handleTransportAccept}
-                          onDecline={handleTransportDecline}
-                        />
-                      ))}
-                    </div>
-                </aside>
-              )}
             </div>
           </div>
         </div>
@@ -697,13 +753,11 @@ export default function HospitalDashboard() {
   );
 }
 
-function TopBar({ hospital, slug, searchQuery, onSearchChange }) {
+function TopBar({ hospital, slug, searchQuery, onSearchChange, onLogout }) {
   return (
     <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
       <div className="flex flex-wrap items-center gap-3">
-        <Link to="/" className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
-          <ArrowLeft size={16} />
-        </Link>
+        <HistoryNav backFallback="/" />
         <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
           <CircleDot size={12} className="text-emerald-400" />
           Dashboard
@@ -739,6 +793,13 @@ function TopBar({ hospital, slug, searchQuery, onSearchChange }) {
         >
           Open Patient Log
         </Link>
+        <button
+          onClick={onLogout}
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-white/[0.06] text-slate-400 transition hover:bg-red-500/15 hover:text-red-400"
+          title="Log out"
+        >
+          <LogOut size={15} />
+        </button>
       </div>
     </div>
   );
@@ -760,18 +821,21 @@ function AlertBanner({ items }) {
 
         <div className="flex flex-wrap gap-2">
           {items.map((item) => (
-            <a
+            <button
               key={item.key}
-              href={item.href}
+              type="button"
+              onClick={item.action}
               className={`inline-flex min-h-[40px] items-center gap-2 rounded-full px-4 text-sm font-medium transition ${
                 item.tone === 'amber'
                   ? 'bg-amber-100 text-amber-800 hover:bg-amber-200'
+                  : item.tone === 'violet'
+                  ? 'bg-violet-100 text-violet-800 hover:bg-violet-200'
                   : 'bg-sky-100 text-sky-800 hover:bg-sky-200'
               }`}
             >
-              {item.tone === 'amber' ? <Zap size={14} /> : <ClipboardList size={14} />}
+              {item.tone === 'amber' ? <Zap size={14} /> : item.tone === 'violet' ? <Ambulance size={14} /> : <ClipboardList size={14} />}
               {item.title}
-            </a>
+            </button>
           ))}
         </div>
       </div>
@@ -1031,15 +1095,31 @@ function BedCard({ bed, draftValue, isLoading, onDraftChange, onCommit, onIncrem
   );
 }
 
-function PatientRequestCard({ hs, hospital, loading, onAccept, onDecline, onOverride, onComplete }) {
+function PatientRequestCard({ hs, hospital, loading, highlighted, onAccept, onDecline, onOverride, onComplete, onTransportAccept, onTransportDecline }) {
   const isAccepted = hs.status === 'accepted';
   const remaining = hs.time_remaining_sec;
   const urgency = hs.parsed_requirements?.urgency || hs._urgency || 'medium';
   const urgencyMeta = URGENCY_META[urgency] || URGENCY_META.medium;
   const statusMeta = STATUS_META[hs.status] || STATUS_META.requested;
+  const contactPhone = hs.parsed_requirements?.contact_phone || hs.requesting_party_phone;
+  const emergencyPhone = hs.parsed_requirements?.emergency_contact_phone;
+  const transport = hs._transport_request;
+  const transportNeedsResponse = hs._transport_needs_response;
+  const transportStatusLabel = {
+    asking_hospital: 'Transport needed',
+    hospital_accepted: 'Hospital transport confirmed',
+    asking_dispatch: 'Sent to ambulance services',
+    dispatch_accepted: 'Ambulance assigned',
+    no_ambulance: 'No ambulance found',
+  }[transport?.status];
 
   return (
-    <div className="rounded-[24px] border border-slate-100 bg-white px-5 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)]">
+    <div
+      id={`request-${hs.id}`}
+      className={`rounded-[24px] border bg-white px-5 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)] transition-all ${
+        highlighted ? 'border-sky-300 ring-4 ring-sky-100' : 'border-slate-100'
+      }`}
+    >
       <div className="flex items-start gap-4">
         <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-600">
           <ClipboardList size={18} />
@@ -1077,14 +1157,10 @@ function PatientRequestCard({ hs, hospital, loading, onAccept, onDecline, onOver
                 </>
               ) : (
                 <>
-                  <button
-                    onClick={() => onComplete(hs.id)}
-                    disabled={loading}
-                    className="inline-flex min-h-[38px] items-center gap-1 rounded-full bg-emerald-500 px-3.5 text-xs font-medium text-white transition hover:bg-emerald-400 disabled:opacity-50"
-                  >
-                    {loading === 'complete' ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
-                    Arrived
-                  </button>
+                  <ArrivalButton
+                    onComplete={(code) => onComplete(hs.id, code)}
+                    loading={loading === 'complete'}
+                  />
                   <OverrideButton
                     onOverride={(walkinUrgency) => onOverride(hs.id, walkinUrgency)}
                     loading={loading === 'override'}
@@ -1098,6 +1174,21 @@ function PatientRequestCard({ hs, hospital, loading, onAccept, onDecline, onOver
           </div>
 
           <p className="mt-3 text-[15px] leading-7 text-slate-700">{hs.patient_summary || 'Patient summary unavailable'}</p>
+
+          <div className="mt-3 flex flex-wrap gap-2.5 text-xs text-slate-600">
+            {contactPhone && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5">
+                <Phone size={12} />
+                {contactPhone}
+              </span>
+            )}
+            {emergencyPhone && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5">
+                <ShieldAlert size={12} />
+                {emergencyPhone}
+              </span>
+            )}
+          </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-500">
             {isAccepted && remaining > 0 && (
@@ -1115,56 +1206,69 @@ function PatientRequestCard({ hs, hospital, loading, onAccept, onDecline, onOver
               />
             )}
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
-function TransportCard({ tr, loading, onAccept, onDecline }) {
-  return (
-    <div className="rounded-[24px] border border-slate-100 bg-white px-5 py-4 shadow-[0_4px_18px_rgba(15,23,42,0.04)]">
-      <div className="flex items-start gap-4">
-        <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl bg-red-50 text-red-500">
-          <Ambulance size={18} />
-        </div>
+          {transport ? (
+            <div className={`mt-4 rounded-2xl border px-4 py-4 ${
+              transportNeedsResponse ? 'border-red-100 bg-red-50/70' : 'border-slate-200 bg-slate-50/80'
+            }`}>
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white text-red-500 shadow-sm">
+                      <Ambulance size={15} />
+                    </span>
+                    <p className="text-sm font-semibold text-slate-900">{transportStatusLabel || 'Transport update'}</p>
+                    {transport?.severity ? (
+                      <span className="inline-flex rounded-full border border-red-100 bg-white px-2.5 py-1 text-[11px] font-medium text-red-600">
+                        {transport.severity.toUpperCase()}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-slate-700">
+                    Pickup: {transport.pickup_address || 'Location shared'}
+                  </p>
+                  {transport._patient_summary ? (
+                    <p className="mt-1 text-sm leading-6 text-slate-600">{transport._patient_summary}</p>
+                  ) : null}
+                  <div className="mt-3 flex flex-wrap gap-2.5 text-xs text-slate-600">
+                    {transport.patient_phone && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5">
+                        <Phone size={12} />
+                        {transport.patient_phone}
+                      </span>
+                    )}
+                    {transport._emergency_contact_phone && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5">
+                        <ShieldAlert size={12} />
+                        {transport._emergency_contact_phone}
+                      </span>
+                    )}
+                  </div>
+                </div>
 
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-base font-semibold text-slate-900">Ambulance pickup needed</p>
-                <span className="inline-flex rounded-full border border-red-100 bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-600">
-                  {(tr.severity || 'medium').toUpperCase()}
-                </span>
+                {transportNeedsResponse ? (
+                  <div className="flex flex-wrap gap-2 lg:justify-end">
+                    <button
+                      onClick={() => onTransportAccept(transport.id)}
+                      disabled={loading === 'transport_accept'}
+                      className="inline-flex min-h-[38px] items-center justify-center gap-1 rounded-full bg-emerald-500 px-3.5 text-xs font-medium text-white transition hover:bg-emerald-400 disabled:opacity-50"
+                    >
+                      {loading === 'transport_accept' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                      Send ambulance
+                    </button>
+                    <button
+                      onClick={() => onTransportDecline(transport.id)}
+                      disabled={loading === 'transport_decline'}
+                      className="inline-flex min-h-[38px] items-center justify-center gap-1 rounded-full border border-red-200 bg-white px-3.5 text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-50"
+                    >
+                      {loading === 'transport_decline' ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+                      Decline transport
+                    </button>
+                  </div>
+                ) : null}
               </div>
-              <p className="mt-1 text-sm text-slate-500">Transport request from patient flow</p>
             </div>
-
-            <div className="flex flex-wrap gap-2 lg:justify-end">
-              <button
-                onClick={() => onAccept(tr.id)}
-                disabled={loading}
-                className="inline-flex min-h-[38px] items-center justify-center gap-1 rounded-full bg-emerald-500 px-3.5 text-xs font-medium text-white transition hover:bg-emerald-400 disabled:opacity-50"
-              >
-                {loading === 'accept' ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-                Send
-              </button>
-              <button
-                onClick={() => onDecline(tr.id)}
-                disabled={loading}
-                className="inline-flex min-h-[38px] items-center justify-center gap-1 rounded-full border border-red-200 bg-white px-3.5 text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-50"
-              >
-                {loading === 'decline' ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
-                Decline
-              </button>
-            </div>
-          </div>
-
-          <div className="mt-3 space-y-1">
-            <p className="text-[15px] leading-7 text-slate-700">Pickup: {tr.pickup_address || 'Location shared'}</p>
-            <p className="text-sm text-slate-500">Respond if your hospital can send an ambulance for this request.</p>
-          </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1381,6 +1485,60 @@ function PatientETA({ patientLat, patientLng, hospitalLat, hospitalLng, position
         <span className="text-[11px] text-slate-500">{distance} km away</span>
       </div>
       {isStale ? <span className="text-[10px] text-slate-400">GPS {freshness}s ago</span> : null}
+    </div>
+  );
+}
+
+function ArrivalButton({ onComplete, loading }) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!code.trim()) return;
+    onComplete(code.trim());
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        disabled={loading}
+        className="inline-flex min-h-[38px] items-center gap-1 rounded-full bg-emerald-500 px-3.5 text-xs font-medium text-white transition hover:bg-emerald-400 disabled:opacity-50"
+      >
+        {loading ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+        Arrived
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <form onSubmit={handleSubmit} className="flex items-center gap-1.5">
+        <input
+          type="text"
+          value={code}
+          onChange={e => setCode(e.target.value.toUpperCase())}
+          placeholder="CODE"
+          autoFocus
+          maxLength={6}
+          className="w-[80px] rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-center font-mono text-sm font-bold tracking-widest text-slate-900 outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-100"
+        />
+        <button
+          type="submit"
+          disabled={loading || !code.trim()}
+          className="inline-flex min-h-[34px] items-center gap-1 rounded-full bg-emerald-500 px-3 text-xs font-medium text-white transition hover:bg-emerald-400 disabled:opacity-50"
+        >
+          {loading ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+          Verify
+        </button>
+      </form>
+      <button
+        onClick={() => { setOpen(false); setCode(''); }}
+        className="text-slate-400 hover:text-slate-600"
+      >
+        <X size={14} />
+      </button>
     </div>
   );
 }

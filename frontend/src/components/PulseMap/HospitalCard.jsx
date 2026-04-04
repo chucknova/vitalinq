@@ -74,7 +74,7 @@ export default function HospitalCard({ hospital, onClose }) {
         <div className="mb-3 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1 pr-4">
             <p className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Hospital</p>
-            <h3 className="truncate text-base font-semibold leading-tight text-white">
+            <h3 className="truncate text-[15px] font-semibold leading-tight text-white sm:text-base">
               {hospital.name}
             </h3>
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -94,7 +94,7 @@ export default function HospitalCard({ hospital, onClose }) {
               <span className="text-[10px] uppercase tracking-[0.12em]">Open</span>
             </div>
             <div className="mt-1 text-center leading-none">
-              <span className="block text-2xl font-semibold text-white">{totalAvail}</span>
+              <span className="block text-[1.35rem] font-semibold text-white sm:text-2xl">{totalAvail}</span>
               <span className="block text-[10px] text-slate-500">of {totalBeds || 0}</span>
             </div>
           </div>
@@ -135,7 +135,7 @@ export default function HospitalCard({ hospital, onClose }) {
             return (
               <div key={bed.bed_type} className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
                 <div className="mb-1.5 flex items-center justify-between gap-3">
-                  <span className="text-sm text-slate-200">{label}</span>
+                  <span className="text-[13px] text-slate-200 sm:text-sm">{label}</span>
                   <span className="text-xs">
                     {avail > 0 ? (
                       <span className="font-medium text-emerald-300">{avail} open</span>

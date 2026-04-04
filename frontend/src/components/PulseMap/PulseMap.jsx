@@ -366,11 +366,11 @@ export default function PulseMap() {
             <div className="inline-flex rounded-full border border-white/[0.08] bg-[#0b1422]/88 px-3 py-1.5 shadow-sm backdrop-blur-sm">
               <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-sky-300/80">Live map</p>
             </div>
-            <h1 className="mt-3 flex items-center gap-2 text-2xl font-semibold tracking-tight text-white">
+            <h1 className="mt-3 flex items-center gap-2 text-[1.35rem] font-semibold tracking-tight text-white sm:text-2xl">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
               BedSignal Pulse
             </h1>
-            <p className="mt-1 text-xs tracking-wide text-slate-400">
+            <p className="mt-1 max-w-[12rem] text-[11px] tracking-wide text-slate-400 sm:max-w-none sm:text-xs">
               Real-time hospital availability around Lagos
             </p>
           </div>

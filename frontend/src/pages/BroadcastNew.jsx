@@ -6,13 +6,14 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import Map, { Marker, NavigationControl } from 'react-map-gl/mapbox';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import {
-  ArrowLeft, Radio, MapPin, Users, FileText, Loader2, AlertTriangle, Camera, X, LocateFixed, ImagePlus
+  Radio, MapPin, Users, FileText, Loader2, AlertTriangle, Camera, X, LocateFixed, ImagePlus
 } from 'lucide-react';
 import api from '../lib/api';
+import HistoryNav from '../components/HistoryNav';
 
 const LAGOS = { latitude: 6.5244, longitude: 3.3792, zoom: 11 };
 
@@ -466,9 +467,7 @@ function TopBar() {
   return (
     <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
       <div className="flex flex-wrap items-center gap-3">
-        <Link to="/broadcast" className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
-          <ArrowLeft size={16} />
-        </Link>
+        <HistoryNav backFallback="/broadcast" />
         <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
           <Radio size={13} className="text-red-400" />
           New broadcast

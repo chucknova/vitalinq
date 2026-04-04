@@ -7,7 +7,8 @@ POST /api/handshakes/{id}/complete — mark patient arrived
 """
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from app.config import settings
 from app.models.handshake import (
     HandshakeCreateRequest,
     HandshakeCreateResponse,
@@ -23,7 +24,7 @@ from app.services.handshake_mgr import (
     complete_handshake,
     get_handshake_detail,
 )
-from app.database import supabase
+from app.database import supabase, execute_async
 from app.services.transport_queue import request_transport
 
 router = APIRouter(prefix="/handshakes", tags=["Handshakes"])
@@ -34,15 +35,14 @@ router = APIRouter(prefix="/handshakes", tags=["Handshakes"])
 # ---------------------------------------------------------------------------
 
 @router.post("", response_model=HandshakeCreateResponse)
-async def create_handshake_endpoint(request: HandshakeCreateRequest):
+async def create_handshake_endpoint(request: HandshakeCreateRequest, background_tasks: BackgroundTasks):
     """Create a new bed reservation request."""
 
     # Verify hospital exists and get WhatsApp number
-    hospital = (
+    hospital = await execute_async(
         supabase.table("hospitals")
         .select("id, name, whatsapp_number, address")
         .eq("id", request.receiving_hospital_id)
-        .execute()
     )
     if not hospital.data:
         raise HTTPException(status_code=404, detail="Hospital not found")
@@ -67,17 +67,38 @@ async def create_handshake_endpoint(request: HandshakeCreateRequest):
         bed_label = request.bed_type.upper()
         urgency = (request.parsed_requirements or {}).get("urgency", "unknown").upper()
         urgency_emoji = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(urgency, "⚪")
-        await send_buttons(hospital_phone, (
-            f"🚨 *Incoming Patient — Bed Hold Request*\n\n"
-            f"Urgency: {urgency_emoji} *{urgency}*\n"
-            f"Bed needed: *{bed_label}*\n"
-            f"Patient: {request.patient_summary or 'No details provided'}\n"
-            f"Transfer code: *{handshake['transfer_code']}*\n\n"
-            f"Hold expires in {request.hold_duration_min} min if accepted."
-        ), [
-            ("✅ Accept", f"accept_handshake_{handshake['id']}"),
-            ("❌ Decline", f"decline_handshake_{handshake['id']}"),
-        ])
+        background_tasks.add_task(
+            send_buttons,
+            hospital_phone,
+            (
+                f"🚨 *Incoming Patient — Bed Hold Request*\n\n"
+                f"Urgency: {urgency_emoji} *{urgency}*\n"
+                f"Bed needed: *{bed_label}*\n"
+                f"Patient: {request.patient_summary or 'No details provided'}\n"
+                f"Transfer code: *{handshake['transfer_code']}*\n\n"
+                f"Hold expires in {request.hold_duration_min} min if accepted."
+            ),
+            [
+                ("✅ Accept", f"accept_handshake_{handshake['id']}"),
+                ("❌ Decline", f"decline_handshake_{handshake['id']}"),
+            ],
+        )
+
+    track_link = f"{settings.FRONTEND_URL}/emergency/{handshake['id']}/track"
+    emergency_phone = ((request.parsed_requirements or {}).get("emergency_contact_phone") or "").strip()
+    if emergency_phone and emergency_phone != request.requesting_party_phone:
+        from app.services.whatsapp import send_text
+        background_tasks.add_task(
+            send_text,
+            emergency_phone,
+            (
+                f"🚨 *Hospital request created for {h['name']}*\n\n"
+                f"Booking code: *{handshake['transfer_code']}*\n"
+                f"Status: Waiting for hospital confirmation\n\n"
+                f"We'll share important updates here too.\n\n"
+                f"Track updates:\n{track_link}"
+            ),
+        )
 
     return HandshakeCreateResponse(
         handshake_id=handshake["id"],

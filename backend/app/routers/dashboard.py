@@ -11,16 +11,21 @@ POST /api/hospitals/dashboard/{slug}/decline/{handshake_id}   — decline with r
 
 import math
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from app.database import supabase
+from app.database import supabase, execute_async
+from app.auth import get_current_user
+from app.config import settings
 from app.services.search_engine import extract_equipment, _parse_location
 from app.services.handshake_mgr import accept_handshake, decline_handshake
 from app.services.transport_reroute import reroute_transport_request
+from app.services.dashboard_cache import get_summary, set_summary, invalidate_summary
 from app.services.whatsapp import send_text, send_buttons
 
 router = APIRouter(prefix="/hospitals/dashboard", tags=["Hospital Dashboard"])
+
+HOSPITAL_STATS_CACHE_TTL_SEC = 30.0
 
 
 def _haversine(lat1, lng1, lat2, lng2):
@@ -38,13 +43,41 @@ async def _send_text_background(phone: str, message: str):
         print(f"   ⚠️ Background send_text failed: {exc}")
 
 
+def _extract_emergency_phone(handshake: dict) -> str | None:
+    parsed_requirements = handshake.get("parsed_requirements")
+    if not isinstance(parsed_requirements, dict):
+        return None
+    phone = (parsed_requirements.get("emergency_contact_phone") or "").strip()
+    return phone or None
+
+
+def _queue_contact_notifications(background_tasks: BackgroundTasks, handshake: dict, message: str):
+    phones = []
+    requester_phone = (handshake.get("requesting_party_phone") or "").strip()
+    emergency_phone = _extract_emergency_phone(handshake)
+    if requester_phone:
+        phones.append(requester_phone)
+    if emergency_phone and emergency_phone not in phones:
+        phones.append(emergency_phone)
+
+    for phone in phones:
+        background_tasks.add_task(_send_text_background, phone, message)
+
+
+def _build_emergency_track_link(handshake_id: str | None) -> str | None:
+    if not handshake_id:
+        return None
+    return f"{settings.FRONTEND_URL}/emergency/{handshake_id}/track"
+
+
 async def _background_override_reroute(handshake_id: str, result: dict, hospital_name: str):
     try:
         transport_req = (
+            await execute_async(
             supabase.table("transport_requests")
             .select("id, assignment_id, status")
             .eq("handshake_id", handshake_id)
-            .execute()
+            )
         ).data or []
 
         if transport_req:
@@ -64,107 +97,61 @@ async def _background_override_reroute(handshake_id: str, result: dict, hospital
 # Helper: resolve slug to hospital
 # ---------------------------------------------------------------------------
 
-def get_hospital_by_slug(slug: str) -> dict:
-    result = (
+async def get_hospital_by_slug(slug: str) -> dict:
+    result = await execute_async(
         supabase.table("hospitals")
         .select("*")
         .eq("slug", slug)
-        .execute()
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Hospital not found")
     return result.data[0]
 
 
-# ---------------------------------------------------------------------------
-# GET /api/hospitals/dashboard/{slug}
-# ---------------------------------------------------------------------------
+async def _build_hospital_dashboard_stats(hospital: dict, hospital_id: str, now: datetime) -> dict:
+    cached_stats = get_summary("hospital_dashboard_stats", hospital_id)
+    if cached_stats is not None:
+        return cached_stats
 
-@router.get("/{slug}")
-async def get_dashboard(slug: str):
-    """
-    Returns everything the hospital dashboard needs in one call:
-    hospital info, all beds, active handshakes, and stats.
-    """
-    hospital = get_hospital_by_slug(slug)
-    hospital_id = hospital["id"]
-    now = datetime.now(timezone.utc)
-
-    # ── Beds ──────────────────────────────────────────
-    beds = (
-        supabase.table("hospital_beds")
-        .select("*")
-        .eq("hospital_id", hospital_id)
-        .execute()
-    ).data
-
-    # ── Active handshakes (requested + accepted) ─────
-    active_handshakes = (
-        supabase.table("handshakes")
-        .select("*")
-        .eq("receiving_hospital_id", hospital_id)
-        .in_("status", ["requested", "accepted"])
-        .order("created_at", desc=True)
-        .execute()
-    ).data
-
-    # Compute time_remaining for accepted handshakes
-    for hs in active_handshakes:
-        if hs["status"] == "accepted" and hs.get("expires_at"):
-            expires = hs["expires_at"]
-            if isinstance(expires, str):
-                expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-            remaining = (expires - now).total_seconds()
-            hs["time_remaining_sec"] = max(0, int(remaining))
-        else:
-            hs["time_remaining_sec"] = None
-
-    # ── Recent handshakes (last 24h, all statuses) ───
     cutoff_24h = (now - timedelta(hours=24)).isoformat()
     recent_handshakes = (
+        await execute_async(
         supabase.table("handshakes")
         .select("id, status, created_at")
         .eq("receiving_hospital_id", hospital_id)
         .gt("created_at", cutoff_24h)
-        .execute()
-    ).data
+        )
+    ).data or []
 
-    # ── Stats ─────────────────────────────────────────
-
-    # Patients routed in last 7 days
     cutoff_7d = (now - timedelta(days=7)).isoformat()
-    routed_7d = (
+    routed_7d = await execute_async(
         supabase.table("handshakes")
         .select("id", count="exact")
         .eq("receiving_hospital_id", hospital_id)
         .gt("created_at", cutoff_7d)
-        .execute()
     )
 
-    # Patients admitted (completed) in last 7 days
-    admitted_7d = (
+    admitted_7d = await execute_async(
         supabase.table("handshakes")
         .select("id", count="exact")
         .eq("receiving_hospital_id", hospital_id)
         .eq("status", "completed")
         .gt("created_at", cutoff_7d)
-        .execute()
     )
 
-    # Verification signals in last 30 days
     cutoff_30d = (now - timedelta(days=30)).isoformat()
     signals = (
+        await execute_async(
         supabase.table("verification_signals")
         .select("signal_value")
         .eq("hospital_id", hospital_id)
         .gt("created_at", cutoff_30d)
-        .execute()
-    ).data
+        )
+    ).data or []
 
-    positive_signals = sum(1 for s in signals if s["signal_value"] == "positive")
+    positive_signals = sum(1 for signal in signals if signal["signal_value"] == "positive")
     total_signals = len(signals)
 
-    # Freshness
     last_report = hospital.get("last_report_at")
     if last_report:
         if isinstance(last_report, str):
@@ -174,103 +161,6 @@ async def get_dashboard(slug: str):
         hours_since = (now - last_report_dt).total_seconds() / 3600
     else:
         hours_since = None
-
-    # Parse location
-    lat, lng = _parse_location(hospital.get("location"))
-
-    # ── Pending broadcasts this hospital can answer from the dashboard ─────
-    pending_broadcasts = []
-    broadcast_history = []
-    if lat is not None and lng is not None:
-        active_broadcasts = (
-            supabase.table("broadcasts")
-            .select("id, title, description, lat, lng, radius_km, expected_patients, created_at, status, images")
-            .eq("status", "active")
-            .order("created_at", desc=True)
-            .execute()
-        ).data or []
-
-        if active_broadcasts:
-            existing_responses = (
-                supabase.table("broadcast_responses")
-                .select("broadcast_id, status")
-                .eq("hospital_id", hospital_id)
-                .in_("broadcast_id", [b["id"] for b in active_broadcasts])
-                .execute()
-            ).data or []
-            responded_ids = {response["broadcast_id"] for response in existing_responses if response.get("broadcast_id")}
-
-            for broadcast in active_broadcasts:
-                if broadcast["id"] in responded_ids:
-                    continue
-                b_lat = broadcast.get("lat")
-                b_lng = broadcast.get("lng")
-                if b_lat is None or b_lng is None:
-                    continue
-                distance_km = round(_haversine(lat, lng, b_lat, b_lng), 1)
-                if distance_km > (broadcast.get("radius_km") or 0):
-                    continue
-                pending_broadcasts.append({
-                    **broadcast,
-                    "_distance_km": distance_km,
-                })
-
-    # ── Broadcast history for this hospital ────────────────────────────────
-    response_rows = (
-        supabase.table("broadcast_responses")
-        .select("broadcast_id, status, responded_at, notes, icu_available, ward_available, emergency_available, surgical_available, maternity_available, pediatric_available, broadcasts(id, title, description, created_at, status, expected_patients, images)")
-        .eq("hospital_id", hospital_id)
-        .order("responded_at", desc=True)
-        .limit(20)
-        .execute()
-    ).data or []
-
-    history_broadcast_ids = [row["broadcast_id"] for row in response_rows if row.get("broadcast_id")]
-    assigned_patients = []
-    if history_broadcast_ids:
-        assigned_patients = (
-            supabase.table("broadcast_patients")
-            .select("id, broadcast_id, status, handshake_id")
-            .eq("assigned_hospital_id", hospital_id)
-            .in_("broadcast_id", history_broadcast_ids)
-            .execute()
-        ).data or []
-
-    handshakes_by_id = {}
-    handshake_ids = [patient["handshake_id"] for patient in assigned_patients if patient.get("handshake_id")]
-    if handshake_ids:
-        handshake_rows = (
-            supabase.table("handshakes")
-            .select("id, status")
-            .in_("id", handshake_ids)
-            .execute()
-        ).data or []
-        handshakes_by_id = {row["id"]: row for row in handshake_rows}
-
-    patient_groups = {}
-    for patient in assigned_patients:
-        patient_groups.setdefault(patient["broadcast_id"], []).append(patient)
-
-    for row in response_rows:
-        broadcast = row.get("broadcasts") or {}
-        patients_for_broadcast = patient_groups.get(row["broadcast_id"], [])
-        accepted_count = 0
-        arrived_count = 0
-        for patient in patients_for_broadcast:
-            handshake = handshakes_by_id.get(patient.get("handshake_id"))
-            handshake_status = handshake.get("status") if handshake else None
-            if handshake_status in ("accepted", "completed"):
-                accepted_count += 1
-            if handshake_status == "completed" or patient.get("status") in ("admitted", "delivered"):
-                arrived_count += 1
-
-        broadcast_history.append({
-            **row,
-            "broadcast": broadcast,
-            "assigned_patients_count": len(patients_for_broadcast),
-            "accepted_patients_count": accepted_count,
-            "arrived_patients_count": arrived_count,
-        })
 
     stats = {
         "accuracy_score": hospital.get("accuracy_score", 0.5),
@@ -290,6 +180,123 @@ async def get_dashboard(slug: str):
             "expired": sum(1 for h in recent_handshakes if h["status"] == "expired"),
         },
     }
+    return set_summary("hospital_dashboard_stats", hospital_id, stats, HOSPITAL_STATS_CACHE_TTL_SEC)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/hospitals/dashboard/{slug}
+# ---------------------------------------------------------------------------
+
+@router.get("/{slug}")
+async def get_dashboard(slug: str, user: dict = Depends(get_current_user)):
+    """
+    Returns everything the hospital dashboard needs in one call:
+    hospital info, all beds, active handshakes, and stats.
+    """
+    hospital = await get_hospital_by_slug(slug)
+    hospital_id = hospital["id"]
+    now = datetime.now(timezone.utc)
+
+    # ── Beds ──────────────────────────────────────────
+    beds = (
+        await execute_async(
+        supabase.table("hospital_beds")
+        .select("*")
+        .eq("hospital_id", hospital_id)
+        )
+    ).data
+
+    # ── Active handshakes (requested + accepted) ─────
+    active_handshakes = (
+        await execute_async(
+        supabase.table("handshakes")
+        .select("*")
+        .eq("receiving_hospital_id", hospital_id)
+        .in_("status", ["requested", "accepted"])
+        .order("created_at", desc=True)
+        )
+    ).data
+
+    # Compute time_remaining for accepted handshakes
+    for hs in active_handshakes:
+        if hs["status"] == "accepted" and hs.get("expires_at"):
+            expires = hs["expires_at"]
+            if isinstance(expires, str):
+                expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            remaining = (expires - now).total_seconds()
+            hs["time_remaining_sec"] = max(0, int(remaining))
+        else:
+            hs["time_remaining_sec"] = None
+
+    active_handshake_ids = [hs["id"] for hs in active_handshakes if hs.get("id")]
+    transport_requests = []
+    if active_handshake_ids:
+        transport_requests = (
+            await execute_async(
+            supabase.table("transport_requests")
+            .select("*")
+            .in_("handshake_id", active_handshake_ids)
+            .order("created_at", desc=True)
+            )
+        ).data or []
+
+    transport_by_handshake = {}
+    for transport in transport_requests:
+        handshake_id = transport.get("handshake_id")
+        if handshake_id and handshake_id not in transport_by_handshake:
+            transport_by_handshake[handshake_id] = transport
+
+    transport_needed_count = 0
+    for hs in active_handshakes:
+        transport = transport_by_handshake.get(hs["id"])
+        hs["_transport_request"] = transport
+        hs["_transport_needs_response"] = bool(transport and transport.get("status") == "asking_hospital")
+        if hs["_transport_needs_response"]:
+            transport_needed_count += 1
+
+    stats = await _build_hospital_dashboard_stats(hospital, hospital_id, now)
+
+    # Parse location
+    lat, lng = _parse_location(hospital.get("location"))
+
+    # ── Pending broadcasts this hospital can answer from the dashboard ─────
+    pending_broadcasts = []
+    broadcast_history = []
+    if lat is not None and lng is not None:
+        active_broadcasts = (
+            await execute_async(
+            supabase.table("broadcasts")
+            .select("id, title, description, lat, lng, radius_km, expected_patients, created_at, status, images")
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            )
+        ).data or []
+
+        if active_broadcasts:
+            existing_responses = (
+                await execute_async(
+                supabase.table("broadcast_responses")
+                .select("broadcast_id, status")
+                .eq("hospital_id", hospital_id)
+                .in_("broadcast_id", [b["id"] for b in active_broadcasts])
+                )
+            ).data or []
+            responded_ids = {response["broadcast_id"] for response in existing_responses if response.get("broadcast_id")}
+
+            for broadcast in active_broadcasts:
+                if broadcast["id"] in responded_ids:
+                    continue
+                b_lat = broadcast.get("lat")
+                b_lng = broadcast.get("lng")
+                if b_lat is None or b_lng is None:
+                    continue
+                distance_km = round(_haversine(lat, lng, b_lat, b_lng), 1)
+                if distance_km > (broadcast.get("radius_km") or 0):
+                    continue
+                pending_broadcasts.append({
+                    **broadcast,
+                    "_distance_km": distance_km,
+                })
 
     return {
         "hospital": {
@@ -310,7 +317,7 @@ async def get_dashboard(slug: str):
         "beds": beds,
         "active_handshakes": active_handshakes,
         "pending_broadcasts": pending_broadcasts,
-        "broadcast_history": broadcast_history,
+        "transport_needed_count": transport_needed_count,
         "stats": stats,
         "dashboard_url": f"/hospital/{slug}/dashboard",
         "log_url": f"/log/{slug}",
@@ -322,9 +329,10 @@ async def get_dashboard(slug: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/{slug}/broadcasts/{broadcast_id}/respond")
-async def respond_to_broadcast(slug: str, broadcast_id: str, request: BroadcastResponseRequest):
-    hospital = get_hospital_by_slug(slug)
+async def respond_to_broadcast(slug: str, broadcast_id: str, request: BroadcastResponseRequest, user: dict = Depends(get_current_user)):
+    hospital = await get_hospital_by_slug(slug)
     hospital_id = hospital["id"]
+    invalidate_summary("hospital_dashboard_stats", hospital_id)
 
     broadcast = (
         supabase.table("broadcasts")
@@ -427,45 +435,39 @@ class BroadcastResponseRequest(BaseModel):
     action: str  # respond | decline
 
 @router.post("/{slug}/beds")
-async def update_beds_by_slug(slug: str, request: BedUpdateRequest):
+async def update_beds_by_slug(slug: str, request: BedUpdateRequest, user: dict = Depends(get_current_user)):
     """Update bed availability from the dashboard."""
-    hospital = get_hospital_by_slug(slug)
+    hospital = await get_hospital_by_slug(slug)
     hospital_id = hospital["id"]
+    invalidate_summary("hospital_dashboard_stats", hospital_id)
     now = datetime.now(timezone.utc).isoformat()
-    updated = []
+    bed_rows = []
 
     for bed in request.beds:
-        existing = (
-            supabase.table("hospital_beds")
-            .select("id")
-            .eq("hospital_id", hospital_id)
-            .eq("bed_type", bed.bed_type)
-            .execute()
-        )
-
-        bed_data = {
+        bed_rows.append({
             "hospital_id": hospital_id,
             "bed_type": bed.bed_type,
             "available_count": bed.available_count,
             "overflow_count": bed.overflow_count,
             "reported_by": request.reported_by,
             "reported_at": now,
-        }
+        })
 
-        if existing.data:
-            supabase.table("hospital_beds").update(bed_data).eq("id", existing.data[0]["id"]).execute()
-        else:
-            supabase.table("hospital_beds").insert(bed_data).execute()
+    if bed_rows:
+        await execute_async(
+            supabase.table("hospital_beds").upsert(
+                bed_rows,
+                on_conflict="hospital_id,bed_type",
+            )
+        )
 
-        updated.append(bed.bed_type)
-
-    supabase.table("hospitals").update({
+    await execute_async(supabase.table("hospitals").update({
         "last_report_at": now,
         "freshness_score": 1.0,
         "updated_at": now,
-    }).eq("id", hospital_id).execute()
+    }).eq("id", hospital_id))
 
-    return {"status": "updated", "updated_bed_types": updated}
+    return {"status": "updated", "updated_bed_types": [bed["bed_type"] for bed in bed_rows]}
 
 
 # ---------------------------------------------------------------------------
@@ -473,10 +475,11 @@ async def update_beds_by_slug(slug: str, request: BedUpdateRequest):
 # ---------------------------------------------------------------------------
 
 @router.post("/{slug}/beds/{bed_type}/increment")
-async def increment_bed(slug: str, bed_type: str):
+async def increment_bed(slug: str, bed_type: str, user: dict = Depends(get_current_user)):
     """Add 1 to available_count for a bed type. Caps at total_count."""
-    hospital = get_hospital_by_slug(slug)
+    hospital = await get_hospital_by_slug(slug)
     hospital_id = hospital["id"]
+    invalidate_summary("hospital_dashboard_stats", hospital_id)
     now = datetime.now(timezone.utc).isoformat()
 
     bed = (
@@ -514,10 +517,11 @@ async def increment_bed(slug: str, bed_type: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/{slug}/beds/{bed_type}/decrement")
-async def decrement_bed(slug: str, bed_type: str):
+async def decrement_bed(slug: str, bed_type: str, user: dict = Depends(get_current_user)):
     """Subtract 1 from available_count for a bed type. Floors at 0."""
-    hospital = get_hospital_by_slug(slug)
+    hospital = await get_hospital_by_slug(slug)
     hospital_id = hospital["id"]
+    invalidate_summary("hospital_dashboard_stats", hospital_id)
     now = datetime.now(timezone.utc).isoformat()
 
     bed = (
@@ -554,9 +558,10 @@ async def decrement_bed(slug: str, bed_type: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/{slug}/accept/{handshake_id}")
-async def accept_handshake_web(slug: str, handshake_id: str, background_tasks: BackgroundTasks):
+async def accept_handshake_web(slug: str, handshake_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     """Accept a handshake from the web dashboard."""
-    hospital = get_hospital_by_slug(slug)
+    hospital = await get_hospital_by_slug(slug)
+    invalidate_summary("hospital_dashboard_stats", hospital["id"])
 
     # Verify handshake belongs to this hospital
     hs = (
@@ -578,18 +583,21 @@ async def accept_handshake_web(slug: str, handshake_id: str, background_tasks: B
         raise HTTPException(status_code=400, detail="Failed to accept handshake")
 
     # Notify the patient via WhatsApp
-    requester_phone = handshake["requesting_party_phone"]
     transfer_code = handshake["transfer_code"]
     bed_type = handshake["bed_type"].upper()
 
-    background_tasks.add_task(_send_text_background, requester_phone, (
+    message = (
         f"\u2705 *Bed confirmed at {hospital['name']}!*\n\n"
         f"Bed type: {bed_type}\n"
         f"Address: {hospital['address']}\n"
         f"Transfer code: *{transfer_code}*\n"
         f"Bed held for 45 minutes.\n\n"
         f"Show the transfer code on arrival."
-    ))
+    )
+    track_link = _build_emergency_track_link(handshake_id)
+    if track_link:
+        message += f"\n\nTrack updates:\n{track_link}"
+    _queue_contact_notifications(background_tasks, handshake, message)
 
     return {"status": "accepted", "transfer_code": transfer_code}
 
@@ -612,9 +620,10 @@ DECLINE_REASONS = {
 }
 
 @router.post("/{slug}/decline/{handshake_id}")
-async def decline_handshake_web(slug: str, handshake_id: str, request: DeclineRequest, background_tasks: BackgroundTasks):
+async def decline_handshake_web(slug: str, handshake_id: str, request: DeclineRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     """Decline a handshake with reason from the web dashboard."""
-    hospital = get_hospital_by_slug(slug)
+    hospital = await get_hospital_by_slug(slug)
+    invalidate_summary("hospital_dashboard_stats", hospital["id"])
 
     # Verify handshake belongs to this hospital
     hs = (
@@ -643,12 +652,15 @@ async def decline_handshake_web(slug: str, handshake_id: str, request: DeclineRe
         raise HTTPException(status_code=400, detail="Failed to decline handshake")
 
     # Notify the patient
-    requester_phone = handshake["requesting_party_phone"]
-    background_tasks.add_task(_send_text_background, requester_phone, (
+    message = (
         f"\u274c *{hospital['name']}* could not hold a bed.\n"
         f"Reason: {reason_label}\n\n"
         f"Send *EMERGENCY* to search for other available hospitals."
-    ))
+    )
+    track_link = _build_emergency_track_link(handshake_id)
+    if track_link:
+        message += f"\n\nTrack updates:\n{track_link}"
+    _queue_contact_notifications(background_tasks, handshake, message)
 
     return {"status": "declined", "reason": request.reason}
 
@@ -662,9 +674,10 @@ class OverrideRequest(BaseModel):
     reason: Optional[str] = None
 
 @router.post("/{slug}/override/{handshake_id}")
-async def override_handshake_web(slug: str, handshake_id: str, request: OverrideRequest, background_tasks: BackgroundTasks):
+async def override_handshake_web(slug: str, handshake_id: str, request: OverrideRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     """Override a held bed for a walk-in emergency from the web dashboard."""
-    hospital = get_hospital_by_slug(slug)
+    hospital = await get_hospital_by_slug(slug)
+    invalidate_summary("hospital_dashboard_stats", hospital["id"])
 
     # Verify handshake belongs to this hospital and is accepted
     hs = (
@@ -701,10 +714,14 @@ async def override_handshake_web(slug: str, handshake_id: str, request: Override
 # POST /api/hospitals/dashboard/{slug}/complete/{handshake_id}
 # ---------------------------------------------------------------------------
 
+class CompleteRequest(BaseModel):
+    transfer_code: str
+
 @router.post("/{slug}/complete/{handshake_id}")
-async def complete_handshake_web(slug: str, handshake_id: str, background_tasks: BackgroundTasks):
-    """Confirm patient arrival — complete the handshake from the web dashboard."""
-    hospital = get_hospital_by_slug(slug)
+async def complete_handshake_web(slug: str, handshake_id: str, request: CompleteRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    """Confirm patient arrival — verify transfer code and complete the handshake."""
+    hospital = await get_hospital_by_slug(slug)
+    invalidate_summary("hospital_dashboard_stats", hospital["id"])
 
     # Verify handshake belongs to this hospital and is accepted
     hs = (
@@ -720,6 +737,11 @@ async def complete_handshake_web(slug: str, handshake_id: str, background_tasks:
         raise HTTPException(status_code=404, detail="Handshake not found or not in accepted status")
 
     handshake = hs.data[0]
+
+    # Verify transfer code
+    if handshake["transfer_code"] != request.transfer_code.upper().strip():
+        raise HTTPException(status_code=400, detail="Incorrect transfer code")
+
     now = datetime.now(timezone.utc).isoformat()
 
     # Complete the handshake
@@ -729,13 +751,284 @@ async def complete_handshake_web(slug: str, handshake_id: str, background_tasks:
     }).eq("id", handshake_id).execute()
 
     # Notify the patient
-    requester_phone = handshake["requesting_party_phone"]
     transfer_code = handshake["transfer_code"]
 
-    background_tasks.add_task(_send_text_background, requester_phone, (
+    message = (
         f"✅ *Arrival confirmed at {hospital['name']}!*\n\n"
         f"Transfer code *{transfer_code}* has been verified.\n"
         f"Wishing a speedy recovery."
-    ))
+    )
+    track_link = _build_emergency_track_link(handshake_id)
+    if track_link:
+        message += f"\n\nTrack updates:\n{track_link}"
+    _queue_contact_notifications(background_tasks, handshake, message)
 
     return {"status": "completed", "transfer_code": transfer_code}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/hospitals/dashboard/{slug}/bed-scan — AI camera bed detection
+# ---------------------------------------------------------------------------
+
+class BedScanRequest(BaseModel):
+    bed_type: str
+    image_base64: str  # base64-encoded image from phone camera
+
+@router.post("/{slug}/bed-scan")
+async def scan_beds(slug: str, request: BedScanRequest, user: dict = Depends(get_current_user)):
+    """
+    Analyze a photo of a hospital ward using Claude Vision to detect
+    bed occupancy. Updates the bed count for the specified bed type.
+    """
+    import anthropic
+
+    hospital = await get_hospital_by_slug(slug)
+
+    # Determine the media type from the base64 header or default to jpeg
+    image_data = request.image_base64
+    media_type = "image/jpeg"
+    if image_data.startswith("data:"):
+        # Strip the data URL prefix: "data:image/png;base64,..."
+        header, image_data = image_data.split(",", 1)
+        if "image/png" in header:
+            media_type = "image/png"
+        elif "image/webp" in header:
+            media_type = "image/webp"
+
+    # Call Claude Vision to analyze the image
+    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": image_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are analyzing a photo of a hospital ward or room. "
+                            "Count the total number of beds visible and how many are "
+                            "occupied (have a person lying in or sitting on them) vs empty. "
+                            "An occupied bed has a person visibly on it. An empty bed has "
+                            "no person on it (may have sheets, pillows, equipment). "
+                            "If you cannot clearly identify beds, estimate based on what you see. "
+                            "Return ONLY valid JSON, no other text:\n"
+                            '{ "total_beds": <number>, "occupied": <number>, "empty": <number>, '
+                            '"confidence": "high" | "medium" | "low", '
+                            '"notes": "<brief description of what you see>" }'
+                        ),
+                    },
+                ],
+            }],
+        )
+
+        text = message.content[0].text.strip()
+        # Strip markdown fences if present
+        if text.startswith("```"):
+            text = text.removeprefix("```json").removeprefix("```")
+        if text.endswith("```"):
+            text = text.removesuffix("```")
+        text = text.strip()
+
+        import json
+        result = json.loads(text)
+
+        total = result.get("total_beds", 0)
+        occupied = result.get("occupied", 0)
+        empty = result.get("empty", 0)
+        confidence = result.get("confidence", "low")
+        notes = result.get("notes", "")
+
+        print(f"📷 BED SCAN: {hospital['name']} — {request.bed_type} — "
+              f"total={total}, occupied={occupied}, empty={empty} ({confidence})")
+
+        # Update the bed count in the database
+        bed_record = (
+            supabase.table("hospital_beds")
+            .select("id, total_count, available_count")
+            .eq("hospital_id", hospital["id"])
+            .eq("bed_type", request.bed_type)
+            .execute()
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        if bed_record.data:
+            bed = bed_record.data[0]
+            supabase.table("hospital_beds").update({
+                "total_count": total,
+                "available_count": empty,
+            }).eq("id", bed["id"]).execute()
+        else:
+            # Create new bed record
+            supabase.table("hospital_beds").insert({
+                "hospital_id": hospital["id"],
+                "bed_type": request.bed_type,
+                "total_count": total,
+                "available_count": empty,
+            }).execute()
+
+        # Update hospital freshness
+        supabase.table("hospitals").update({
+            "last_report_at": now,
+        }).eq("id", hospital["id"]).execute()
+
+        return {
+            "total_beds": total,
+            "occupied": occupied,
+            "empty": empty,
+            "confidence": confidence,
+            "notes": notes,
+            "bed_type": request.bed_type,
+            "updated": True,
+        }
+
+    except json.JSONDecodeError as e:
+        print(f"⚠️ BED SCAN: Claude returned invalid JSON: {e}")
+        raise HTTPException(status_code=500, detail="AI analysis failed — could not parse response")
+    except anthropic.APIError as e:
+        print(f"❌ BED SCAN: Claude API error: {e}")
+        raise HTTPException(status_code=500, detail="AI analysis failed — API error")
+    except Exception as e:
+        print(f"❌ BED SCAN: Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
+
+# ---------------------------------------------------------------------------
+# Department Access — code-based auth for charge nurses
+# ---------------------------------------------------------------------------
+
+class DeptCodeCreate(BaseModel):
+    bed_types: list[str]
+    label: str
+
+class DeptCodeVerify(BaseModel):
+    access_code: str
+
+
+def _normalize_department_access_code(code: str | None) -> str:
+    """Normalize department codes so verification is case/whitespace insensitive."""
+    return "".join((code or "").upper().split())
+
+# POST /api/hospitals/dashboard/{slug}/departments — list department codes (admin only)
+@router.get("/{slug}/departments")
+async def list_department_codes(slug: str, user: dict = Depends(get_current_user)):
+    """List all department access codes for this hospital (admin only)."""
+    hospital = await get_hospital_by_slug(slug)
+    codes = (
+        supabase.table("department_access")
+        .select("id, bed_types, access_code, label, is_active, created_at")
+        .eq("hospital_id", hospital["id"])
+        .eq("is_active", True)
+        .order("label")
+        .execute()
+    ).data or []
+    return {"departments": codes}
+
+# POST /api/hospitals/dashboard/{slug}/departments/create — generate a new code
+@router.post("/{slug}/departments/create")
+async def create_department_code(slug: str, request: DeptCodeCreate, user: dict = Depends(get_current_user)):
+    """Generate a new department access code."""
+    import secrets, string
+    hospital = await get_hospital_by_slug(slug)
+
+    chars = string.ascii_uppercase + string.digits
+    chars = chars.replace("O", "").replace("0", "").replace("I", "").replace("L", "").replace("1", "")
+    code = _normalize_department_access_code("".join(secrets.choice(chars) for _ in range(6)))
+
+    result = supabase.table("department_access").insert({
+        "hospital_id": hospital["id"],
+        "bed_types": request.bed_types,
+        "access_code": code,
+        "label": request.label,
+    }).execute()
+
+    return result.data[0]
+
+# DELETE /api/hospitals/dashboard/{slug}/departments/{dept_id}
+@router.delete("/{slug}/departments/{dept_id}")
+async def delete_department_code(slug: str, dept_id: str, user: dict = Depends(get_current_user)):
+    """Deactivate a department access code."""
+    hospital = await get_hospital_by_slug(slug)
+    supabase.table("department_access").update({"is_active": False}).eq("id", dept_id).eq("hospital_id", hospital["id"]).execute()
+    return {"deleted": True}
+
+# POST /api/hospitals/dashboard/{slug}/department/verify — verify a department code (no auth required)
+@router.post("/{slug}/department/verify")
+async def verify_department_code(slug: str, request: DeptCodeVerify):
+    """Verify a department access code. No auth required — the code IS the auth."""
+    hospital = await get_hospital_by_slug(slug)
+    code = _normalize_department_access_code(request.access_code)
+    departments = (
+        await execute_async(
+            supabase.table("department_access")
+            .select("*")
+            .eq("hospital_id", hospital["id"])
+            .eq("is_active", True)
+        )
+    ).data or []
+
+    dept = next(
+        (
+            row
+            for row in departments
+            if _normalize_department_access_code(row.get("access_code")) == code
+        ),
+        None,
+    )
+
+    if not dept:
+        # This route is intentionally public, so a bad code should not masquerade
+        # as a failed bearer-token authentication event on the client.
+        raise HTTPException(status_code=403, detail="Invalid department code")
+
+    return {
+        "verified": True,
+        "label": dept["label"],
+        "bed_types": dept["bed_types"],
+        "hospital_name": hospital["name"],
+    }
+
+# GET /api/hospitals/dashboard/{slug}/department/data — get department-filtered data (no auth, code verified client-side)
+@router.get("/{slug}/department/data")
+async def get_department_data(slug: str, bed_types: str):
+    """Get dashboard data filtered to specific bed types. bed_types is comma-separated."""
+    hospital = await get_hospital_by_slug(slug)
+    types = [t.strip() for t in bed_types.split(",")]
+
+    # Beds for this department only
+    beds = (
+        supabase.table("hospital_beds")
+        .select("*")
+        .eq("hospital_id", hospital["id"])
+        .in_("bed_type", types)
+        .execute()
+    ).data or []
+
+    # Handshakes for this department's bed types
+    all_hs = (
+        supabase.table("handshakes")
+        .select("*")
+        .eq("receiving_hospital_id", hospital["id"])
+        .in_("status", ["requested", "accepted"])
+        .order("created_at", desc=True)
+        .execute()
+    ).data or []
+
+    # Filter to matching bed types
+    dept_handshakes = [h for h in all_hs if h.get("bed_type") in types]
+
+    return {
+        "hospital": {"id": hospital["id"], "name": hospital["name"], "slug": slug},
+        "beds": beds,
+        "handshakes": dept_handshakes,
+    }

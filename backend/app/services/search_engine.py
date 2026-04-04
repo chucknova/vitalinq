@@ -15,7 +15,7 @@ Usage:
 
 import hashlib
 from datetime import datetime, timezone
-from app.database import supabase
+from app.database import supabase, execute_async
 
 
 # ---------------------------------------------------------------------------
@@ -64,37 +64,46 @@ async def search_nearby(
 
     radius_m = radius_km * 1000
 
-    # ── Step 1: Find hospitals within radius using PostGIS ─────────
+    # ── Step 1: Let the database narrow candidates by bed availability ─────
     #
-    # Supabase's Python client doesn't support raw PostGIS SQL directly,
-    # so we use an RPC call to a database function. But for the hackathon,
-    # we'll use the .rpc() method with a raw SQL function.
-    #
-    # First, let's create the query using Supabase's REST API.
-    # We fetch all active hospitals, then filter/rank in Python.
-    # This works fine for 30 hospitals. For thousands, you'd push
-    # the PostGIS query into a database function.
-    # ────────────────────────────────────────────────────────────────
+    # We still rank by distance in Python because location currently lives in a
+    # PostGIS geography column without an RPC/helper function in this codebase.
+    # But we no longer load every hospital and every bed row first.
+    # ──────────────────────────────────────────────────────────────────────────
 
-    # Fetch all active hospitals with their beds
-    hospitals_resp = (
-        supabase.table("hospitals")
-        .select("*")
-        .eq("is_active", True)
-        .execute()
-    )
-    hospitals = hospitals_resp.data
-
-    beds_resp = (
+    beds_query = (
         supabase.table("hospital_beds")
-        .select("*")
-        .execute()
+        .select("hospital_id, bed_type, available_count, overflow_count, capacity_tier")
     )
-    all_beds = beds_resp.data
+    if bed_type:
+        beds_query = beds_query.eq("bed_type", bed_type)
+    if include_overflow:
+        beds_query = beds_query.or_("available_count.gt.0,overflow_count.gt.0")
+    else:
+        beds_query = beds_query.gt("available_count", 0)
+
+    beds_resp = await execute_async(beds_query)
+    candidate_beds = beds_resp.data or []
+
+    candidate_hospital_ids = list({bed["hospital_id"] for bed in candidate_beds if bed.get("hospital_id")})
+    hospitals = []
+    if candidate_hospital_ids:
+        hospitals_resp = await execute_async(
+            supabase.table("hospitals")
+            .select(
+                "id, name, address, location, is_active, accuracy_score, trust_tier, "
+                "last_report_at, has_icu, has_theatre, has_blood_bank, has_ct_scanner, "
+                "has_mri, has_ventilators, has_dialysis, has_oxygen, has_xray, "
+                "has_ultrasound, has_pharmacy, has_lab, has_ambulance"
+            )
+            .eq("is_active", True)
+            .in_("id", candidate_hospital_ids)
+        )
+        hospitals = hospitals_resp.data or []
 
     # Group beds by hospital_id
     beds_by_hospital: dict[str, list[dict]] = {}
-    for bed in all_beds:
+    for bed in candidate_beds:
         hid = bed["hospital_id"]
         if hid not in beds_by_hospital:
             beds_by_hospital[hid] = []
@@ -119,7 +128,7 @@ async def search_nearby(
         if dist_km > radius_km:
             continue
 
-        # Get this hospital's beds
+        # Get this hospital's already-filtered candidate beds
         hospital_beds = beds_by_hospital.get(h["id"], [])
 
         # Filter by bed availability
@@ -237,7 +246,7 @@ async def search_nearby(
         "followup_sent": False,
     }
 
-    query_resp = supabase.table("queries").insert(query_row).execute()
+    query_resp = await execute_async(supabase.table("queries").insert(query_row))
     query_id = query_resp.data[0]["id"]
 
     return results, query_id

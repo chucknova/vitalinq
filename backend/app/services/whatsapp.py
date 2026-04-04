@@ -23,8 +23,11 @@ Usage:
     ])
 """
 
+import asyncio
+from time import perf_counter
 from twilio.rest import Client
 from app.config import settings
+from app.telemetry import record_notification_time
 
 # ---------------------------------------------------------------------------
 # Dry run mode — logs messages to terminal instead of sending via Twilio.
@@ -65,15 +68,18 @@ async def send_text(to: str, body: str):
     This is the most common message type — used for confirmations,
     status displays, error messages, etc.
     """
+    started = perf_counter()
     if DRY_RUN:
         print(f"\n📤 DRY RUN → {to}")
         print(f"{'─' * 50}")
         print(body)
         print(f"{'─' * 50}\n")
+        record_notification_time((perf_counter() - started) * 1000)
         return None
 
     try:
-        message = client.messages.create(
+        message = await asyncio.to_thread(
+            client.messages.create,
             body=body,
             from_=FROM_NUMBER,
             to=_to_whatsapp(to),
@@ -83,6 +89,8 @@ async def send_text(to: str, body: str):
     except Exception as e:
         print(f"❌ Failed to send text to {to}: {e}")
         return None
+    finally:
+        record_notification_time((perf_counter() - started) * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -155,13 +163,16 @@ async def send_buttons_content_api(
         )
     """
     import json
+    started = perf_counter()
     if DRY_RUN:
         print(f"\n📤 DRY RUN BUTTONS → {to} [template: {content_sid}]")
         print(f"   Variables: {content_variables}")
+        record_notification_time((perf_counter() - started) * 1000)
         return None
 
     try:
-        message = client.messages.create(
+        message = await asyncio.to_thread(
+            client.messages.create,
             content_sid=content_sid,
             content_variables=json.dumps(content_variables),
             from_=FROM_NUMBER,
@@ -172,6 +183,8 @@ async def send_buttons_content_api(
     except Exception as e:
         print(f"❌ Failed to send buttons to {to}: {e}")
         return None
+    finally:
+        record_notification_time((perf_counter() - started) * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -238,13 +251,16 @@ async def send_list_content_api(
     Same as send_buttons_content_api but for list templates.
     """
     import json
+    started = perf_counter()
     if DRY_RUN:
         print(f"\n📤 DRY RUN LIST → {to} [template: {content_sid}]")
         print(f"   Variables: {content_variables}")
+        record_notification_time((perf_counter() - started) * 1000)
         return None
 
     try:
-        message = client.messages.create(
+        message = await asyncio.to_thread(
+            client.messages.create,
             content_sid=content_sid,
             content_variables=json.dumps(content_variables),
             from_=FROM_NUMBER,
@@ -255,6 +271,8 @@ async def send_list_content_api(
     except Exception as e:
         print(f"❌ Failed to send list to {to}: {e}")
         return None
+    finally:
+        record_notification_time((perf_counter() - started) * 1000)
 
 
 # ---------------------------------------------------------------------------

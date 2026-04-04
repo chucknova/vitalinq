@@ -8,10 +8,11 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
-  ArrowLeft, Plus, Check, Loader2, AlertTriangle, Radio, Users, X,
+  Plus, Check, Loader2, AlertTriangle, Radio, Users, X,
   ShieldAlert, Activity, HeartPulse, CircleDot, ClipboardList
 } from 'lucide-react';
 import api from '../lib/api';
+import HistoryNav from '../components/HistoryNav';
 
 const SEVERITY_OPTIONS = [
   { id: 'critical', label: 'Critical', icon: ShieldAlert, tone: 'bg-red-50 text-red-600 border-red-100', dot: 'bg-red-500', desc: 'Life-threatening' },
@@ -323,9 +324,7 @@ function TopBar({ broadcast, id, count }) {
   return (
     <div className="flex flex-col gap-3 rounded-[24px] bg-[#171717] px-4 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
       <div className="flex flex-wrap items-center gap-3">
-        <Link to={`/broadcast/${id}`} className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 transition hover:bg-white/15">
-          <ArrowLeft size={16} />
-        </Link>
+        <HistoryNav backFallback={`/broadcast/${id}`} />
         <div className="flex items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-sm font-medium">
           <Radio size={13} className="text-red-400" />
           Broadcast log
