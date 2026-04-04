@@ -328,6 +328,9 @@ async def get_dashboard(slug: str, user: dict = Depends(get_current_user)):
 # POST /api/hospitals/dashboard/{slug}/broadcasts/{broadcast_id}/respond
 # ---------------------------------------------------------------------------
 
+class BroadcastResponseRequest(BaseModel):
+    action: str  # respond | decline
+
 @router.post("/{slug}/broadcasts/{broadcast_id}/respond")
 async def respond_to_broadcast(slug: str, broadcast_id: str, request: BroadcastResponseRequest, user: dict = Depends(get_current_user)):
     hospital = await get_hospital_by_slug(slug)
@@ -430,9 +433,6 @@ class BedUpdateRequest(BaseModel):
     beds: list[BedUpdateItem]
     reported_by: str = "Dashboard"
 
-
-class BroadcastResponseRequest(BaseModel):
-    action: str  # respond | decline
 
 @router.post("/{slug}/beds")
 async def update_beds_by_slug(slug: str, request: BedUpdateRequest, user: dict = Depends(get_current_user)):
