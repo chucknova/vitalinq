@@ -2,7 +2,7 @@
 nixPkgs = ["python311", "python311Packages.pip"]
 
 [phases.install]
-cmds = ["cd backend && pip3 install -r requirements.txt"]
+cmds = ["python3 -m venv /opt/venv", ". /opt/venv/bin/activate && cd backend && pip install -r requirements.txt"]
 
 [start]
-cmd = "cd backend && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+cmd = ". /opt/venv/bin/activate && cd backend && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
