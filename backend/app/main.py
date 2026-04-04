@@ -58,6 +58,8 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
+    app.add_middleware(
+    CORSMiddleware,
     allow_origins=[
         settings.FRONTEND_URL,
         "http://localhost:5173",
@@ -65,7 +67,13 @@ app.add_middleware(
         "http://localhost:5175",
         "http://localhost:5176",
         "https://bedsignal.vercel.app",
+        "https://vitalinq.vercel.app"
     ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
